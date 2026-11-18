@@ -838,6 +838,37 @@ inline Bitmap* SysIconBitmap(int index, int size) {
     return bmp;
 }
 
+// HBITMAP (32 bpp con alfa premultiplicado, p. ej. de IShellItemImageFactory) -> Bitmap PARGB.
+inline Bitmap* HBitmapToBitmap(HBITMAP hb) {
+    if (!hb) return nullptr;
+    BITMAP bm = {};
+    if (!GetObjectW(hb, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight == 0) return nullptr;
+    int w = bm.bmWidth, h = std::abs(bm.bmHeight);
+    std::vector<DWORD> px((size_t)w * h);
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC dc = GetDC(nullptr);
+    int lines = GetDIBits(dc, hb, 0, h, px.data(), &bi, DIB_RGB_COLORS);
+    ReleaseDC(nullptr, dc);
+    if (lines <= 0) return nullptr;
+    bool alpha = false;
+    for (DWORD p : px) if (p >> 24) { alpha = true; break; }
+    if (!alpha) for (DWORD& p : px) p |= 0xFF000000;
+    Bitmap* out = new Bitmap(w, h, PixelFormat32bppPARGB);
+    BitmapData bd = {};
+    Rect r(0, 0, w, h);
+    if (out->LockBits(&r, ImageLockModeWrite, PixelFormat32bppPARGB, &bd) == Ok) {
+        for (int y = 0; y < h; ++y)
+            memcpy((BYTE*)bd.Scan0 + (size_t)y * bd.Stride, px.data() + (size_t)y * w, (size_t)w * 4);
+        out->UnlockBits(&bd);
+    }
+    return out;
+}
 // Conveniencia: icono de una ruta concreta (consulta el archivo).
 inline Bitmap* FileIconBitmap(const std::wstring& path, int size) {
     return SysIconBitmap(SysIconIndex(path), size);
@@ -1704,7 +1735,8 @@ inline int ThemedMenu(HMENU menu, UINT flags, int x, int y, int, HWND owner, con
 // ------------------------------------------------------------ cuadros de mensaje con el tema propio
 class MessageDialog : public WindowBase {
 public:
-    int Run(HWND owner, const std::wstring& msgText, const std::wstring& msgTitle, UINT flags) {
+    int Run(HWND owner, const std::wstring& msgText, const std::wstring& msgTitle, UINT flags, UINT timeoutSec = 0) {
+        remaining = timeoutSec;
         text = msgText;
         title = msgTitle;
         switch (flags & MB_TYPEMASK) {
@@ -1736,7 +1768,7 @@ public:
             textH = b.Height;
         }
         ReleaseDC(nullptr, dc);
-        int h = S(62) + std::max((int)textH, glyph ? S(10) : 0) + S(28) + S(62);
+        int h = S(62) + std::max((int)textH, glyph ? S(10) : 0) + S(28) + S(62) + (timeoutSec ? S(24) : 0);
 
         RECT ref = {};
         if (owner && IsWindowVisible(owner) && !IsIconic(owner)) GetWindowRect(owner, &ref);
@@ -1759,6 +1791,7 @@ public:
         ForceForeground(hwnd);
         SetFocus(hwnd);
         if (glyph) MessageBeep(beep);
+        if (remaining) SetTimer(hwnd, 1, 1000, nullptr);
 
         MSG msg;
         while (!done && IsWindow(hwnd)) {
@@ -1786,6 +1819,7 @@ protected:
     UINT beep = 0, iconKind = 0;
     int cancelId = IDOK, focus = 0, hoverBtn = -1, result = 0;
     bool done = false;
+    UINT remaining = 0; // segundos hasta elegir automáticamente la opción de cancelar
 
     void Finish(int id) {
         result = id;
@@ -1808,6 +1842,9 @@ protected:
             tx += S(48);
         }
         DrawTextStr(g, title, fontBold, style::text, RectF(tx, (float)S(20), w - tx - S(24), (float)S(26)));
+        if (remaining)
+            DrawTextStr(g, L"Se revertirá automáticamente en " + std::to_wstring(remaining) + L" s.", fontSmall, style::warning,
+                        RectF(tx, h - barH - S(30), w - tx - S(24), (float)S(22)));
         DrawTextV(g, text, fontBody, style::textDim, RectF(tx, (float)S(52), w - tx - S(24), h - barH - S(60)),
                   StringAlignmentNear, true);
 
@@ -1854,6 +1891,11 @@ protected:
         return y < S(50) ? HTCAPTION : 0;
     }
 
+    void OnTimer(UINT_PTR) override {
+        if (remaining && --remaining == 0) Finish(cancelId);
+        Invalidate();
+    }
+
     bool CanClose() override {
         Finish(cancelId);
         return false;
@@ -1861,10 +1903,11 @@ protected:
 };
 
 // Misma firma y valores de retorno que MessageBox, con el tema propio.
-inline int MsgBox(HWND owner, const std::wstring& text, const std::wstring& title = L"OptimizedShell", UINT flags = MB_OK) {
+inline int MsgBox(HWND owner, const std::wstring& text, const std::wstring& title = L"OptimizedShell", UINT flags = MB_OK,
+                  UINT timeoutSec = 0) {
     if (!fontBody) return MessageBoxW(owner, text.c_str(), title.c_str(), flags); // UI sin inicializar
     MessageDialog d;
-    return d.Run(owner, text, title, flags);
+    return d.Run(owner, text, title, flags, timeoutSec);
 }
 
 // Bucle de mensajes estándar.

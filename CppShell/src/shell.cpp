@@ -13,6 +13,7 @@
 //        --install / --uninstall (shell del usuario actual)
 #include "ui.h"
 #include "startup.h"
+#include "winrt_bridge.h"
 
 #include <powrprof.h>
 #include <mmdeviceapi.h>
@@ -104,37 +105,6 @@ Worker& BackgroundWorker() {
     return w;
 }
 
-// HBITMAP (32 bpp con alfa premultiplicado, p. ej. de IShellItemImageFactory) -> Bitmap PARGB.
-Bitmap* HBitmapToBitmap(HBITMAP hb) {
-    if (!hb) return nullptr;
-    BITMAP bm = {};
-    if (!GetObjectW(hb, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight == 0) return nullptr;
-    int w = bm.bmWidth, h = std::abs(bm.bmHeight);
-    std::vector<DWORD> px((size_t)w * h);
-    BITMAPINFO bi = {};
-    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    HDC dc = GetDC(nullptr);
-    int lines = GetDIBits(dc, hb, 0, h, px.data(), &bi, DIB_RGB_COLORS);
-    ReleaseDC(nullptr, dc);
-    if (lines <= 0) return nullptr;
-    bool alpha = false;
-    for (DWORD p : px) if (p >> 24) { alpha = true; break; }
-    if (!alpha) for (DWORD& p : px) p |= 0xFF000000;
-    Bitmap* out = new Bitmap(w, h, PixelFormat32bppPARGB);
-    BitmapData bd = {};
-    Rect r(0, 0, w, h);
-    if (out->LockBits(&r, ImageLockModeWrite, PixelFormat32bppPARGB, &bd) == Ok) {
-        for (int y = 0; y < h; ++y)
-            memcpy((BYTE*)bd.Scan0 + (size_t)y * bd.Stride, px.data() + (size_t)y * w, (size_t)w * 4);
-        out->UnlockBits(&bd);
-    }
-    return out;
-}
 
 // ---------------------------------------------------------------- iconos vectoriales
 void DrawSpeaker(Graphics& g, float x, float y, float size, const Color& c) {
@@ -389,7 +359,7 @@ protected:
         AppendMenuW(m, MF_STRING, 1, L"Actualizar\tF5");
         AppendMenuW(m, MF_STRING, 2, L"Abrir el Escritorio en Archivos");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(m, MF_STRING, 3, L"Personalizar fondo");
+        AppendMenuW(m, MF_STRING, 3, L"Cambiar fondo de escritorio");
         AppendMenuW(m, MF_STRING, 4, L"Configuración de pantalla");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, 5, L"Administrador de tareas");
@@ -403,8 +373,8 @@ protected:
         case 2:
             if (SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, dir) == S_OK) OpenInExplorer(dir);
             break;
-        case 3: Launch(L"ms-settings:personalization-background"); break;
-        case 4: Launch(L"ms-settings:display"); break;
+        case 3: LaunchOwn(L"--settings fondo"); break;
+        case 4: LaunchOwn(L"--settings pantalla"); break;
         case 5: LaunchOwn(L"--taskmgr"); break;
         case 6: LaunchOwn(L"--settings"); break;
         }
@@ -1249,9 +1219,13 @@ public:
             }
 
             PWLAN_AVAILABLE_NETWORK_LIST avail = nullptr;
-            if (WlanGetAvailableNetworkList(handle, &info.InterfaceGuid,
-                                            WLAN_AVAILABLE_NETWORK_INCLUDE_ALL_MANUAL_HIDDEN_PROFILES,
-                                            nullptr, &avail) == ERROR_SUCCESS && avail) {
+            DWORD listErr = WlanGetAvailableNetworkList(handle, &info.InterfaceGuid,
+                                                        WLAN_AVAILABLE_NETWORK_INCLUDE_ALL_MANUAL_HIDDEN_PROFILES,
+                                                        nullptr, &avail);
+            // Desde Windows 11 24H2 las aplicaciones de escritorio necesitan permiso de
+            // ubicación para ver las redes: sin él la API devuelve "acceso denegado".
+            needLocation = listErr == ERROR_ACCESS_DENIED;
+            if (listErr == ERROR_SUCCESS && avail) {
                 for (DWORD i = 0; i < avail->dwNumberOfItems; ++i) {
                     const WLAN_AVAILABLE_NETWORK& n = avail->Network[i];
                     std::wstring ssid = SsidToString(n.dot11Ssid);
@@ -1290,6 +1264,41 @@ protected:
     bool haveInterface = false;
     bool radioOn = false;
     bool needScan = true;
+    bool needLocation = false;   // Windows deniega la lista de redes sin permiso de ubicación
+    bool requestingLocation = false;
+    std::wstring locationMsg;
+    RectF locationBtn;
+    int hoverLocation = 0;
+
+    // Pide el permiso en un hilo aparte (WinRT bloqueante); el resultado llega por mensaje.
+    void RequestLocation() {
+        if (requestingLocation) return;
+        requestingLocation = true;
+        locationMsg.clear();
+        Invalidate();
+        HWND target = hwnd;
+        std::thread([target] {
+            wrt::Access a = wrt::RequestLocation();
+            PostMessageW(target, WM_APP + 33, (WPARAM)a, 0);
+        }).detach();
+    }
+
+    LRESULT OnMessage(UINT msg, WPARAM wp, LPARAM lp) override {
+        if (msg == WM_APP + 33) {
+            requestingLocation = false;
+            if ((wrt::Access)wp == wrt::Access::Allowed) {
+                needScan = true;
+                Refresh();
+            } else {
+                // Ubicación desactivada en el sistema o denegada: abrir la página de Windows.
+                locationMsg = L"Activa \"Servicios de ubicación\" y \"Permitir que las aplicaciones de escritorio accedan a tu ubicación\".";
+                Launch(L"ms-settings:privacy-location");
+            }
+            Invalidate();
+            return 0;
+        }
+        return TrayFlyout::OnMessage(msg, wp, lp);
+    }
     ULONGLONG lastScan = 0;
     std::wstring connectedSsid;
     std::vector<WifiNetwork> networks;
@@ -1418,8 +1427,20 @@ protected:
             int visible = RowsVisible();
             int maxOff = std::max(0, (int)networks.size() - visible);
             if (scrollOffset > maxOff) scrollOffset = maxOff;
-            if (networks.empty())
+            locationBtn = RectF();
+            if (needLocation && networks.empty()) {
+                DrawTextV(g, L"Windows necesita el permiso de ubicación para mostrar las redes Wi-Fi cercanas.",
+                          fontBody, style::textDim, RectF((float)S(24), (float)S(122), (float)w - S(48), (float)S(48)),
+                          StringAlignmentCenter, true);
+                locationBtn = RectF((float)(w - S(200)) / 2, (float)S(180), (float)S(200), (float)S(34));
+                style::DrawButton(g, locationBtn, requestingLocation ? L"Solicitando..." : L"Permitir ubicación",
+                                  hoverLocation != 0, true, false, requestingLocation);
+                if (!locationMsg.empty())
+                    DrawTextV(g, locationMsg, fontSmall, style::textFaint,
+                              RectF((float)S(24), (float)S(224), (float)w - S(48), (float)S(54)), StringAlignmentCenter, true);
+            } else if (networks.empty()) {
                 DrawTextStr(g, L"Buscando redes...", fontBody, style::textFaint, msgRc, StringAlignmentCenter);
+            }
             for (int row = 0; row < visible; ++row) {
                 int idx = scrollOffset + row;
                 if (idx >= (int)networks.size()) break;
@@ -1460,6 +1481,7 @@ protected:
         if (InRect(switchRect, x, y)) { SetRadio(!radioOn); return; }
         if (InRect(manageBtn, x, y)) { Launch(L"ms-settings:network-wifi"); Hide(); return; }
         if (InRect(refreshBtn, x, y)) { needScan = true; Refresh(); return; }
+        if (locationBtn.Width > 0 && InRect(locationBtn, x, y)) { RequestLocation(); return; }
         if (InRect(rowArea, x, y)) {
             int idx = scrollOffset + (int)((y - rowArea.Y) / S(54));
             if (idx >= 0 && idx < (int)networks.size()) Connect(networks[idx]);
@@ -1471,8 +1493,11 @@ protected:
         int nr = InRect(switchRect, x, y) ? 1 : 0;
         int nm = InRect(manageBtn, x, y) ? 1 : 0;
         int nf = InRect(refreshBtn, x, y) ? 1 : 0;
+        int nl = (locationBtn.Width > 0 && InRect(locationBtn, x, y)) ? 1 : 0;
+        if (nl != hoverLocation) { hoverLocation = nl; Invalidate(); }
+        if (nl) SetCursor(LoadCursorW(nullptr, IDC_HAND));
         int nrow = -1;
-        if (InRect(rowArea, x, y)) {
+        if (InRect(rowArea, x, y) && !needLocation) {
             int row = (int)((y - rowArea.Y) / S(54));
             if (scrollOffset + row < (int)networks.size()) nrow = scrollOffset + row;
         }
@@ -2332,6 +2357,8 @@ protected:
         AppendMenuW(m, MF_STRING, 5, L"Red");
         AppendMenuW(m, MF_STRING, 6, L"Energía");
         AppendMenuW(m, MF_STRING, 7, L"Fecha y hora");
+        AppendMenuW(m, MF_STRING, 8, L"Bluetooth");
+        AppendMenuW(m, MF_STRING, 9, L"Pantalla");
         SetForegroundWindow(hwnd);
         int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
@@ -2343,6 +2370,8 @@ protected:
         case 5: Launch(L"ncpa.cpl"); break;
         case 6: Launch(L"powercfg.cpl"); break;
         case 7: Launch(L"timedate.cpl"); break;
+        case 8: LaunchOwn(L"--settings bluetooth"); break;
+        case 9: LaunchOwn(L"--settings pantalla"); break;
         }
     }
 

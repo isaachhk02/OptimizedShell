@@ -11,17 +11,17 @@ $out = Join-Path $PSScriptRoot 'bin'
 New-Item -ItemType Directory -Path $out -Force | Out-Null
 
 $src = Join-Path $PSScriptRoot 'src'
-$sources = @('shell.cpp', 'taskmgr.cpp', 'explorer.cpp', 'settings.cpp', 'logonui.cpp' | ForEach-Object { '"' + (Join-Path $src $_) + '"' }) -join ' '
+$sources = @('shell.cpp', 'taskmgr.cpp', 'explorer.cpp', 'settings.cpp', 'winrt_bridge.cpp', 'logonui.cpp' | ForEach-Object { '"' + (Join-Path $src $_) + '"' }) -join ' '
 
 $libs = @(
     'user32.lib', 'gdi32.lib', 'gdiplus.lib', 'shell32.lib', 'ole32.lib', 'oleaut32.lib',
     'shlwapi.lib', 'dwmapi.lib', 'advapi32.lib', 'powrprof.lib', 'psapi.lib',
     'netapi32.lib', 'userenv.lib', 'uxtheme.lib', 'wlanapi.lib', 'uuid.lib',
-    'comctl32.lib', 'pdh.lib', 'iphlpapi.lib'
+    'comctl32.lib', 'pdh.lib', 'iphlpapi.lib', 'wbemuuid.lib', 'windowsapp.lib'
 ) -join ' '
 
 # /O1 + /GL: binario pequeño (menos páginas de código que cargar); /OPT:REF,ICF quitan código sin usar.
-$cl = 'cl /nologo /std:c++17 /utf-8 /O1 /GL /Gw /EHsc /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C /D_CRT_SECURE_NO_WARNINGS'
+$cl = 'cl /nologo /std:c++20 /utf-8 /O1 /GL /Gw /EHsc /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C /D_CRT_SECURE_NO_WARNINGS'
 $link = "/link /LTCG /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /OPT:REF /OPT:ICF $libs"
 $cmd = 'call "{0}" >nul && {1} /Fe:"{2}\OptimizedShellCpp.exe" /Fo:"{2}\\" {3} {4}' -f $vcvars, $cl, $out, $sources, $link
 

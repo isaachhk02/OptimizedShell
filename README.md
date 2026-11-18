@@ -10,7 +10,7 @@ Un solo ejecutable, `OptimizedShellCpp.exe` (unos 580 KB), con varios modos:
 | Administrador de tareas | `--taskmgr [--tab procesos\|rendimiento\|inicio\|servicios]` | Procesos, gráficas de rendimiento, programas de inicio y servicios |
 | Explorador de archivos | `--explorer [ruta]` · `--explorer --select <archivo>` | Explorador con navegación, búsqueda y operaciones de archivo |
 | Bloqueo / inicio de sesión | `--lock` · `--logon [--demo]` | Pantalla de bloqueo propia |
-| Personalización | `--settings` | Modo claro u oscuro, color de acento y transparencia |
+| Configuración | `--settings [personalizacion|fondo|pantalla|bluetooth]` | Tema, fondo de escritorio, pantalla y Bluetooth |
 | Instalación | `--install` · `--uninstall` | Usa OptimizedShell como shell del usuario actual, o vuelve a Explorer |
 
 ## Componentes
@@ -46,6 +46,18 @@ Un solo ejecutable, `OptimizedShellCpp.exe` (unos 580 KB), con varios modos:
 - La carpeta abierta se vigila con `ReadDirectoryChangesW` y se actualiza sola.
 - Copiar, cortar, pegar, eliminar a la Papelera, renombrar y crear carpetas. Usa `IFileOperation` (diálogos estándar y deshacer) y es compatible con el portapapeles de Explorer.
 - Arrastrar y soltar en ambas direcciones, menú contextual nativo bajo demanda ("Más opciones…"), elementos ocultos, "Abrir en Terminal" y atajos de teclado como los de Explorer.
+
+### Configuración
+- **Fondo de escritorio:**
+  - galería con miniaturas de los fondos de Windows y de la carpeta Imágenes;
+  - "Examinar…" para elegir otra imagen;
+  - modos de ajuste: rellenar, ajustar, expandir, mosaico, centro y extender.
+- **Pantalla:**
+  - resolución, frecuencia de actualización y orientación por monitor. Al cambiarlas pide confirmación y, si no confirmas en 15 s, vuelve a la configuración anterior;
+  - escala (solo lectura);
+  - brillo de la pantalla integrada (vía WMI).
+- **Bluetooth:** encender y apagar la radio, ver los dispositivos emparejados y si están conectados, agregar un dispositivo y quitar dispositivos.
+- **Wi‑Fi:** desde Windows 11 24H2, las aplicaciones de escritorio necesitan **permiso de ubicación** para ver las redes. Si falta, el panel de Wi‑Fi muestra un botón **Permitir ubicación** que lo solicita a Windows.
 
 ### Tema propio
 - **Opciones:** modo **oscuro** o **claro**, 11 colores de acento (o el color de acento de Windows) y transparencia acrílica, que se puede desactivar para ahorrar GPU.
