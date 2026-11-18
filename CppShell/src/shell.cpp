@@ -49,6 +49,7 @@ const UINT WM_SHELLACTION = WM_APP + 20;   // wParam = ShellAction
 const UINT WM_APPSLOADED = WM_APP + 30;    // lParam = std::vector<AppEntry>*
 const UINT WM_APPICON = WM_APP + 31;       // lParam = IconResult*
 const UINT WM_CLOAKCHANGED = WM_APP + 32;  // lParam = HWND
+const UINT WM_WALLREADY = WM_APP + 40;     // lParam = Bitmap* (fondo ya renderizado)
 
 enum ShellAction { ActStart = 1, ActExplorer, ActRun, ActTaskMgr, ActShowDesktop };
 
@@ -149,6 +150,55 @@ struct DeskItem {
     int iconIndex = -1;
 };
 
+// Firma del fondo actual (ruta + modo de ajuste): detecta cambios sin volver a decodificar.
+inline std::wstring WallpaperSignature() {
+    return GetWallpaperPath() + L"|" +
+           RegString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallpaperStyle") + L"|" +
+           RegString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"TileWallpaper");
+}
+
+// Renderiza el fondo de escritorio a un bitmap del tamaño de la pantalla, respetando el
+// modo de ajuste (rellenar, ajustar, expandir, mosaico, centro, extender) que guarda Windows.
+// Así el fondo elegido se ve correctamente también en modo shell, donde PaintDesktop no basta.
+// Pesado (decodifica la imagen): ejecútalo en un hilo de trabajo.
+inline Bitmap* RenderWallpaper(int w, int h) {
+    std::wstring path = GetWallpaperPath();
+    if (path.empty() || w <= 0 || h <= 0) return nullptr;
+    std::unique_ptr<Image> img(Image::FromFile(path.c_str())); // se libera (y desbloquea el archivo) al salir
+    if (!img || img->GetLastStatus() != Ok) return nullptr;
+    float iw = (float)img->GetWidth(), ih = (float)img->GetHeight();
+    if (iw <= 0 || ih <= 0) return nullptr;
+
+    int style = _wtoi(RegString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallpaperStyle").c_str());
+    int tile = _wtoi(RegString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"TileWallpaper").c_str());
+
+    COLORREF deskRef = GetSysColor(COLOR_DESKTOP);
+    Bitmap* out = new Bitmap(w, h, PixelFormat32bppRGB);
+    Graphics g(out);
+    g.Clear(Color(255, GetRValue(deskRef), GetGValue(deskRef), GetBValue(deskRef)));
+    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+
+    if (style == 0 && tile) { // mosaico
+        for (float y = 0; y < h; y += ih)
+            for (float x = 0; x < w; x += iw)
+                g.DrawImage(img.get(), x, y, iw, ih);
+    } else if (style == 0) { // centro
+        g.DrawImage(img.get(), (w - iw) / 2, (h - ih) / 2, iw, ih);
+    } else if (style == 2) { // expandir (estirar sin conservar proporción)
+        g.DrawImage(img.get(), RectF(0, 0, (float)w, (float)h), 0, 0, iw, ih, UnitPixel);
+    } else if (style == 6) { // ajustar (contener; conserva proporción, sin recortar)
+        float scale = std::min(w / iw, h / ih);
+        float dw = iw * scale, dh = ih * scale;
+        g.DrawImage(img.get(), RectF((w - dw) / 2, (h - dh) / 2, dw, dh), 0, 0, iw, ih, UnitPixel);
+    } else { // rellenar (10) / extender (22): cubrir conservando proporción, recortando
+        float scale = std::max(w / iw, h / ih);
+        float sw = w / scale, sh = h / scale;
+        g.DrawImage(img.get(), RectF(0, 0, (float)w, (float)h), (iw - sw) / 2, (ih - sh) / 2, sw, sh, UnitPixel);
+    }
+    return out;
+}
+
 class DesktopWindow : public WindowBase {
 public:
     bool Start() {
@@ -160,11 +210,14 @@ public:
         SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         LoadItems();
         StartWatching();
+        wallSig = WallpaperSignature();
+        LoadWallpaper();
         return true;
     }
 
     ~DesktopWindow() override {
         for (HANDLE h : watch) FindCloseChangeNotification(h);
+        delete wallpaper;
     }
 
     const std::vector<HANDLE>& WatchHandles() const { return watch; }
@@ -179,6 +232,7 @@ public:
     void FitToScreen() {
         SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
                      SWP_NOACTIVATE);
+        LoadWallpaper(); // nuevo tamaño: volver a renderizar el fondo
         Invalidate();
     }
 
@@ -186,6 +240,24 @@ protected:
     std::vector<DeskItem> items;
     std::vector<HANDLE> watch;
     int selected = -1;
+    Bitmap* wallpaper = nullptr; // fondo renderizado al tamaño de la pantalla
+    bool wallLoading = false;
+    std::wstring wallSig;
+
+    // Renderiza el fondo en un hilo aparte (decodificar puede tardar) y lo entrega por mensaje.
+    void LoadWallpaper() {
+        if (wallLoading) return;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int w = rc.right, h = rc.bottom;
+        if (w <= 0 || h <= 0) return;
+        wallLoading = true;
+        HWND target = hwnd;
+        std::thread([target, w, h] {
+            Bitmap* bmp = RenderWallpaper(w, h);
+            if (!PostMessageW(target, WM_WALLREADY, 0, (LPARAM)bmp)) delete bmp;
+        }).detach();
+    }
 
     void StartWatching() {
         for (int csidl : { CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY }) {
@@ -263,9 +335,17 @@ protected:
     }
 
     void OnPaintBackground(HDC dc, const RECT& rc) override {
-        // El sistema ya tiene el fondo en memoria: lo reutilizamos en vez de decodificar la imagen.
+        // Fondo propio ya renderizado con el modo de ajuste correcto (funciona también en
+        // modo shell, donde PaintDesktop no muestra bien el fondo elegido).
+        if (wallpaper) {
+            Graphics g(dc);
+            g.SetClip(Rect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top));
+            g.DrawImage(wallpaper, 0, 0, (int)wallpaper->GetWidth(), (int)wallpaper->GetHeight());
+            return;
+        }
+        // Aún cargando (o sin imagen): que lo pinte el sistema o un color sólido.
         if (!PaintDesktop(dc)) {
-            HBRUSH b = CreateSolidBrush(RGB(15, 23, 42));
+            HBRUSH b = CreateSolidBrush(GetSysColor(COLOR_DESKTOP));
             ::FillRect(dc, &rc, b);
             DeleteObject(b);
         }
@@ -333,7 +413,15 @@ protected:
         if (id == 1) { KillTimer(hwnd, 1); LoadItems(); }
     }
 
-    void OnSettingsChange() override { Invalidate(); } // fondo cambiado
+    void OnSettingsChange() override {
+        // WM_SETTINGCHANGE llega por muchos motivos: solo re-renderizamos si cambió el fondo.
+        std::wstring sig = WallpaperSignature();
+        if (sig != wallSig) {
+            wallSig = sig;
+            LoadWallpaper();
+        }
+        Invalidate();
+    }
 
     void ShowItemMenu(int idx, POINT pt) {
         const DeskItem& it = items[idx];
@@ -382,6 +470,22 @@ protected:
 
     LRESULT OnMessage(UINT msg, WPARAM wp, LPARAM lp) override {
         switch (msg) {
+        case WM_WALLREADY: {
+            wallLoading = false;
+            Bitmap* bmp = (Bitmap*)lp;
+            // El tamaño pudo cambiar mientras se renderizaba: si no cuadra, vuelve a pedirlo.
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            if (bmp && (rc.right != (LONG)bmp->GetWidth() || rc.bottom != (LONG)bmp->GetHeight())) {
+                delete bmp;
+                LoadWallpaper();
+                return 0;
+            }
+            delete wallpaper;
+            wallpaper = bmp;
+            Invalidate();
+            return 0;
+        }
         case WM_RBUTTONUP: {
             int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
             int idx = HitTest(x, y);
@@ -1808,16 +1912,26 @@ protected:
 
     bool IsTaskWindow(HWND w) const {
         if (!IsWindow(w) || !IsWindowVisible(w)) return false;
+        if (w == GetShellWindow()) return false; // ventana del escritorio del sistema
         DWORD pid = 0;
         GetWindowThreadProcessId(w, &pid);
         if (pid == GetCurrentProcessId()) return false;
+
         LONG ex = GetWindowLongW(w, GWL_EXSTYLE);
-        if (!(ex & WS_EX_APPWINDOW)) {
-            if (ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) return false;
-            if (GetWindow(w, GW_OWNER)) return false;
-        }
+        if (ex & WS_EX_TOOLWINDOW) return false; // nunca en la barra
         DWORD cloaked = 0;
         if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return false;
+        if (ex & WS_EX_APPWINDOW) return true; // pide explícitamente salir en la barra
+
+        // Ventana poseída: solo representa a su aplicación en la barra si su dueño no está ya
+        // representado (dueño oculto o tool window). Muchas apps de WPF (y Qt/Avalonia) muestran
+        // su ventana principal poseída por una ventana "aparcadero" oculta: con la regla anterior
+        // (rechazar toda ventana con dueño) no salían en la barra ni se podían activar.
+        if (HWND owner = GetWindow(w, GW_OWNER)) {
+            LONG oex = GetWindowLongW(owner, GWL_EXSTYLE);
+            if (IsWindowVisible(owner) && !(oex & WS_EX_TOOLWINDOW)) return false; // el dueño la representa
+        }
+        if (ex & WS_EX_NOACTIVATE) return false;
         return true;
     }
 
@@ -1940,16 +2054,18 @@ protected:
     }
 
     void ActivateTask(HWND w) {
+        // Traer al frente el último popup activo (p. ej. el diálogo modal de una app WPF),
+        // no la ventana principal que lo posee.
+        HWND front = GetLastActivePopup(w);
+        if (!front || !IsWindowVisible(front) || !IsWindowEnabled(front)) front = w;
         if (IsIconic(w)) {
             ShowWindowAsync(w, SW_RESTORE);
-            ForceForeground(w);
-        } else if (w == activeHwnd && GetForegroundWindow() == w) {
-            ShowWindowAsync(w, SW_MINIMIZE);
-        } else if (w == activeHwnd && GetForegroundWindow() == hwnd) {
-            // Al hacer clic la barra toma el foco: la ventana activa era 'w'.
+            ForceForeground(front);
+        } else if (w == activeHwnd && (GetForegroundWindow() == w || GetForegroundWindow() == hwnd)) {
+            // Ya estaba activa (al hacer clic la barra toma el foco): minimizar.
             ShowWindowAsync(w, SW_MINIMIZE);
         } else {
-            ForceForeground(w);
+            ForceForeground(front);
         }
     }
 

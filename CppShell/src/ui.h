@@ -78,7 +78,9 @@ inline Color RGBc(BYTE r, BYTE g, BYTE b) { return Color(255, r, g, b); }
 // así que shell, explorador, Administrador de tareas, menús y diálogos comparten tema.
 namespace style {
 inline bool dark = true;
-inline bool transparency = true;
+inline bool blur = true;          // desenfoque acrílico detrás de las superficies translúcidas
+inline int taskbarOpacity = 60;   // opacidad de la barra de tareas (0-100)
+inline int windowOpacity = 96;    // opacidad de ventanas, paneles y menú Inicio (0-100)
 inline Color windowBg, titleBg, cardBg, cardBorder, text, textDim, textFaint;
 inline Color accent, accentSolid, accentHover, onAccent, rowSelected, focusRing;
 inline Color danger, success, warning, closeHover;
@@ -93,9 +95,12 @@ inline DWORD taskbarTint = 0, flyoutTint = 0; // AABBGGRR para el acrílico de D
 struct ThemeSettings {
     bool dark = true;
     COLORREF accent = RGB(59, 130, 246);
-    bool transparency = true;
+    bool blur = true;            // efecto cristal (acrílico) en superficies translúcidas
+    int taskbarOpacity = 60;     // 0-100
+    int windowOpacity = 96;      // 0-100
     bool operator==(const ThemeSettings& o) const {
-        return dark == o.dark && accent == o.accent && transparency == o.transparency;
+        return dark == o.dark && accent == o.accent && blur == o.blur &&
+               taskbarOpacity == o.taskbarOpacity && windowOpacity == o.windowOpacity;
     }
 };
 
@@ -132,7 +137,14 @@ inline ThemeSettings LoadThemeSettings() {
     GetPrivateProfileStringW(L"Tema", L"Acento", L"3B82F6", buf, 64, file.c_str());
     unsigned long rgb = wcstoul(buf, nullptr, 16);
     t.accent = RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
-    t.transparency = GetPrivateProfileIntW(L"Tema", L"Transparencia", 1, file.c_str()) != 0;
+    // Compatibilidad: la antigua clave "Transparencia" fija los valores por defecto
+    // de las nuevas opciones de desenfoque y opacidad.
+    bool legacy = GetPrivateProfileIntW(L"Tema", L"Transparencia", 1, file.c_str()) != 0;
+    t.blur = GetPrivateProfileIntW(L"Tema", L"Desenfoque", legacy ? 1 : 0, file.c_str()) != 0;
+    t.taskbarOpacity = GetPrivateProfileIntW(L"Tema", L"OpacidadBarra", legacy ? 60 : 100, file.c_str());
+    t.windowOpacity = GetPrivateProfileIntW(L"Tema", L"OpacidadVentanas", legacy ? 96 : 100, file.c_str());
+    t.taskbarOpacity = std::max(0, std::min(100, t.taskbarOpacity));
+    t.windowOpacity = std::max(0, std::min(100, t.windowOpacity));
     return t;
 }
 
@@ -142,7 +154,14 @@ inline void SaveThemeSettings(const ThemeSettings& t) {
     swprintf_s(hex, L"%02X%02X%02X", GetRValue(t.accent), GetGValue(t.accent), GetBValue(t.accent));
     WritePrivateProfileStringW(L"Tema", L"Modo", t.dark ? L"oscuro" : L"claro", file.c_str());
     WritePrivateProfileStringW(L"Tema", L"Acento", hex, file.c_str());
-    WritePrivateProfileStringW(L"Tema", L"Transparencia", t.transparency ? L"1" : L"0", file.c_str());
+    WritePrivateProfileStringW(L"Tema", L"Desenfoque", t.blur ? L"1" : L"0", file.c_str());
+    wchar_t num[16];
+    swprintf_s(num, L"%d", t.taskbarOpacity);
+    WritePrivateProfileStringW(L"Tema", L"OpacidadBarra", num, file.c_str());
+    swprintf_s(num, L"%d", t.windowOpacity);
+    WritePrivateProfileStringW(L"Tema", L"OpacidadVentanas", num, file.c_str());
+    // Se mantiene la clave antigua por compatibilidad con versiones anteriores.
+    WritePrivateProfileStringW(L"Tema", L"Transparencia", t.blur ? L"1" : L"0", file.c_str());
 }
 
 inline Color Mix(const Color& a, const Color& b, float t, BYTE alpha = 255) {
@@ -153,6 +172,13 @@ inline Color Mix(const Color& a, const Color& b, float t, BYTE alpha = 255) {
 inline Color WithAlpha(const Color& c, BYTE a) { return Color(a, c.GetR(), c.GetG(), c.GetB()); }
 
 inline Color FromRef(COLORREF c, BYTE a = 255) { return Color(a, GetRValue(c), GetGValue(c), GetBValue(c)); }
+
+// Opacidad 0-100 -> canal alfa 0-255 (100 = totalmente opaco).
+inline BYTE OpacityAlpha(int op) {
+    if (op < 0) op = 0;
+    if (op > 100) op = 100;
+    return (BYTE)((op * 255 + 50) / 100);
+}
 
 // Color de acento actual de Windows (para "Usar el color de Windows").
 inline COLORREF WindowsAccent() {
@@ -193,14 +219,18 @@ inline void ApplyTheme(const ThemeSettings& t) {
     using namespace style;
     g_theme = t;
     dark = t.dark;
-    transparency = t.transparency;
+    blur = t.blur;
+    taskbarOpacity = t.taskbarOpacity;
+    windowOpacity = t.windowOpacity;
+    BYTE wa = OpacityAlpha(t.windowOpacity); // alfa de ventanas, paneles y menú Inicio
+    BYTE ta = OpacityAlpha(t.taskbarOpacity); // alfa de la barra de tareas
     Color a = FromRef(t.accent);
     Color white(255, 255, 255, 255), black(255, 0, 0, 0);
     float lum = (0.299f * a.GetR() + 0.587f * a.GetG() + 0.114f * a.GetB()) / 255.0f;
 
     if (dark) {
-        windowBg = Color(transparency ? 247 : 255, 17, 20, 27);
-        titleBg = RGBc(23, 27, 36);
+        windowBg = Color(wa, 17, 20, 27);
+        titleBg = Color(wa, 23, 27, 36);
         cardBg = RGBc(27, 31, 41);
         cardBorder = C(40, 255, 255, 255);
         text = RGBc(232, 236, 244);
@@ -214,16 +244,16 @@ inline void ApplyTheme(const ThemeSettings& t) {
         controlHover = RGBc(44, 50, 64);
         controlBorder = C(45, 255, 255, 255);
         separator = C(30, 255, 255, 255);
-        navBg = RGBc(19, 22, 30);
-        dialogBg = RGBc(20, 23, 31);
+        navBg = Color(wa, 19, 22, 30);
+        dialogBg = Color(wa, 20, 23, 31);
         menuBg = RGBc(30, 34, 44);
         menuHover = RGBc(48, 54, 68);
         menuBorder = C(60, 255, 255, 255);
-        taskbarBg = Color(transparency ? 150 : 255, 16, 18, 24);
+        taskbarBg = Color(ta, 16, 18, 24);
         taskButton = RGBc(28, 31, 40);
         taskButtonHover = RGBc(38, 42, 54);
         taskButtonActive = RGBc(46, 51, 66);
-        flyoutBg = Color(transparency ? 246 : 255, 21, 24, 32);
+        flyoutBg = Color(wa, 21, 24, 32);
         flyoutBorder = C(65, 255, 255, 255);
         graphBg = RGBc(22, 26, 35);
         gridLine = C(18, 255, 255, 255);
@@ -236,8 +266,8 @@ inline void ApplyTheme(const ThemeSettings& t) {
         accentHover = Mix(a, white, 0.12f);
         rowSelected = WithAlpha(a, 90);
     } else {
-        windowBg = Color(transparency ? 250 : 255, 247, 248, 250);
-        titleBg = RGBc(237, 239, 243);
+        windowBg = Color(wa, 247, 248, 250);
+        titleBg = Color(wa, 237, 239, 243);
         cardBg = RGBc(255, 255, 255);
         cardBorder = C(36, 0, 0, 0);
         text = RGBc(26, 30, 38);
@@ -251,16 +281,16 @@ inline void ApplyTheme(const ThemeSettings& t) {
         controlHover = RGBc(234, 237, 242);
         controlBorder = C(48, 0, 0, 0);
         separator = C(26, 0, 0, 0);
-        navBg = RGBc(240, 242, 245);
-        dialogBg = RGBc(249, 250, 251);
+        navBg = Color(wa, 240, 242, 245);
+        dialogBg = Color(wa, 249, 250, 251);
         menuBg = RGBc(252, 252, 253);
         menuHover = RGBc(229, 233, 240);
         menuBorder = C(45, 0, 0, 0);
-        taskbarBg = Color(transparency ? 175 : 255, 238, 240, 244);
+        taskbarBg = Color(ta, 238, 240, 244);
         taskButton = RGBc(226, 229, 235);
         taskButtonHover = RGBc(214, 219, 227);
         taskButtonActive = RGBc(250, 251, 252);
-        flyoutBg = Color(transparency ? 244 : 255, 248, 249, 251);
+        flyoutBg = Color(wa, 248, 249, 251);
         flyoutBorder = C(45, 0, 0, 0);
         graphBg = RGBc(255, 255, 255);
         gridLine = C(20, 0, 0, 0);
@@ -417,11 +447,18 @@ inline void ApplyFrame(HWND hwnd, FrameKind kind) {
     DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE
     int pref = kind == FrameTaskbar ? 1 : (kind == FrameMenu ? 3 : 2); // sin redondear / pequeño / normal
     DwmSetWindowAttribute(hwnd, 33, &pref, sizeof(pref));
-    if (kind == FrameTaskbar || kind == FrameFlyout) {
-        bool acrylic = style::transparency;
-        SetAccentPolicy(hwnd, acrylic ? ACCENT_ENABLE_ACRYLICBLURBEHIND : ACCENT_DISABLED,
-                        kind == FrameTaskbar ? style::taskbarTint : style::flyoutTint);
-    }
+    if (kind == FrameMenu) return; // los menús se mantienen opacos para que se lean bien
+
+    // La barra de tareas usa su propia opacidad; el resto de superficies (paneles,
+    // menú Inicio y ventanas) usan la opacidad de ventanas. Con opacidad < 100 se activa
+    // el desenfoque acrílico (efecto cristal) o, si está desactivado, un degradado
+    // translúcido sin desenfoque (ahorra GPU). A 100 la superficie es opaca.
+    int opacity = kind == FrameTaskbar ? style::taskbarOpacity : style::windowOpacity;
+    DWORD tint = kind == FrameTaskbar ? style::taskbarTint : style::flyoutTint;
+    if (opacity >= 100)
+        SetAccentPolicy(hwnd, ACCENT_DISABLED, 0);
+    else
+        SetAccentPolicy(hwnd, style::blur ? ACCENT_ENABLE_ACRYLICBLURBEHIND : ACCENT_ENABLE_TRANSPARENTGRADIENT, tint);
 }
 
 // Compatibilidad: marco opaco con el tema actual.

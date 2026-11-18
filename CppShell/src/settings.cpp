@@ -345,7 +345,7 @@ const wchar_t* BtGlyph(const std::wstring& kind) {
 enum Hit {
     HNone = 0, HMin, HClose,
     HNav0 = 20,
-    HDark = 30, HLight, HWindowsAccent, HTransparency, HReset,
+    HDark = 30, HLight, HWindowsAccent, HBlur, HTaskOpacity, HWinOpacity, HReset,
     HBrowse = 40, HFit0 = 41,
     HMonitor0 = 50, HRes = 60, HHz, HOrient, HScale, HBright, HAdvanced,
     HBtSwitch = 70, HBtAdd, HBtMore, HBtRefresh,
@@ -392,6 +392,11 @@ protected:
     std::map<int, RectF> rc; // rectángulos fijos por id
     float x0 = 0, cw = 0;    // zona de contenido
     int winW = 0, winH = 0;
+
+    // Opacidad (barra de tareas y ventanas) con deslizadores arrastrables.
+    RectF taskOpTrack, winOpTrack;
+    int dragOpacity = 0; // 0 ninguno, 1 barra, 2 ventanas
+    int liveOpacity = 0; // valor mientras se arrastra
     static constexpr int kCaption = 42;
 
     // Fondo
@@ -437,8 +442,12 @@ protected:
         float sw = (float)S(34), gap = (float)S(10);
         for (int i = 0; i < kPresetCount; ++i) rc[HSwatch0 + i] = RectF(x0 + i * (sw + gap), (float)S(330), sw, sw);
         rc[HWindowsAccent] = RectF(x0, (float)S(380), (float)S(236), (float)S(34));
-        rc[HTransparency] = RectF(x0, (float)S(468), cw, (float)S(64));
-        rc[HReset] = RectF(x0 + cw - S(150), (float)h - S(58), (float)S(150), (float)S(34));
+        rc[HBlur] = RectF(x0, (float)S(446), cw, (float)S(56));
+        rc[HTaskOpacity] = RectF(x0, (float)S(510), cw, (float)S(46));
+        rc[HWinOpacity] = RectF(x0, (float)S(562), cw, (float)S(46));
+        taskOpTrack = RectF(rc[HTaskOpacity].X + S(16), rc[HTaskOpacity].Y + S(30), rc[HTaskOpacity].Width - S(32), (float)S(6));
+        winOpTrack = RectF(rc[HWinOpacity].X + S(16), rc[HWinOpacity].Y + S(30), rc[HWinOpacity].Width - S(32), (float)S(6));
+        rc[HReset] = RectF(x0 + cw - S(150), (float)h - S(50), (float)S(150), (float)S(34));
 
         // Fondo
         previewRc = RectF(x0, (float)S(110), (float)S(320), (float)S(180));
@@ -748,6 +757,27 @@ protected:
         DrawRounded(g, r, SF(8), hov ? style::controlHover : style::cardBg, style::controlBorder);
     }
 
+    int OpacityFromX(const RectF& track, int x) const {
+        float t = (x - track.X) / track.Width;
+        return (int)std::round(std::max(0.0f, std::min(1.0f, t)) * 100);
+    }
+
+    // Fila con etiqueta, valor en porcentaje y deslizador (track + tirador).
+    void OpacitySlider(Graphics& g, int id, const RectF& track, const wchar_t* label, int value) {
+        const RectF& r = rc[id];
+        Card(g, r, hover == id || (dragOpacity && ((id == HTaskOpacity && dragOpacity == 1) ||
+                                                    (id == HWinOpacity && dragOpacity == 2))));
+        DrawTextStr(g, label, fontBody, style::text, RectF(r.X + S(16), r.Y + S(4), r.Width - S(90), (float)S(22)));
+        wchar_t buf[16] = {};
+        swprintf_s(buf, L"%d %%", value);
+        DrawTextStr(g, buf, fontSmall, style::textDim, RectF(r.X + r.Width - S(74), r.Y + S(6), (float)S(58), (float)S(20)),
+                    StringAlignmentFar);
+        style::DrawProgress(g, track, value / 100.0f, style::accentSolid);
+        float tx = track.X + track.Width * value / 100.0f;
+        FillCircle(g, tx, track.Y + track.Height / 2, SF(8), style::accentSolid);
+        DrawCircle(g, tx, track.Y + track.Height / 2, SF(8), RGBc(255, 255, 255), 1.2f);
+    }
+
     void OnPaint(Graphics& g, int w, int h) override {
         style::DrawChrome(g, w, h, L"Configuración", L"\uE713", false, hover == HMin ? 1 : (hover == HClose ? 3 : 0));
         FillRect(g, style::ChromeRects(w).max, style::titleBg); // sin maximizar
@@ -831,14 +861,20 @@ protected:
                         RectF(rc[HWindowsAccent].X + rc[HWindowsAccent].Width + S(14), rc[HWindowsAccent].Y, (float)S(240),
                               rc[HWindowsAccent].Height));
 
-        SectionTitle(g, L"Efectos", (float)S(436));
-        const RectF& t = rc[HTransparency];
-        Card(g, t, hover == HTransparency);
-        DrawTextStr(g, L"Transparencia", fontBody, style::text, RectF(t.X + S(16), t.Y + S(10), t.Width - S(100), (float)S(22)));
-        DrawTextStr(g, L"Fondo acrílico en la barra de tareas y los paneles. Desactivarla ahorra GPU.", fontSmall,
-                    style::textDim, RectF(t.X + S(16), t.Y + S(32), t.Width - S(100), (float)S(20)));
-        style::DrawSwitch(g, RectF(t.X + t.Width - S(62), t.Y + (t.Height - S(22)) / 2, (float)S(44), (float)S(22)),
-                          g_theme.transparency, hover == HTransparency);
+        SectionTitle(g, L"Efectos", (float)S(418));
+        const RectF& b = rc[HBlur];
+        Card(g, b, hover == HBlur);
+        DrawTextStr(g, L"Desenfoque (efecto cristal)", fontBody, style::text,
+                    RectF(b.X + S(16), b.Y + S(8), b.Width - S(100), (float)S(22)));
+        DrawTextStr(g, L"Fondo acrílico en la barra de tareas, los paneles y las ventanas. Desactivarlo ahorra GPU.",
+                    fontSmall, style::textDim, RectF(b.X + S(16), b.Y + S(30), b.Width - S(100), (float)S(20)));
+        style::DrawSwitch(g, RectF(b.X + b.Width - S(62), b.Y + (b.Height - S(22)) / 2, (float)S(44), (float)S(22)),
+                          g_theme.blur, hover == HBlur);
+
+        int taskOp = dragOpacity == 1 ? liveOpacity : g_theme.taskbarOpacity;
+        int winOp = dragOpacity == 2 ? liveOpacity : g_theme.windowOpacity;
+        OpacitySlider(g, HTaskOpacity, taskOpTrack, L"Opacidad de la barra de tareas", taskOp);
+        OpacitySlider(g, HWinOpacity, winOpTrack, L"Opacidad de las ventanas", winOp);
 
         DrawTextV(g, L"Los cambios se aplican al momento en todas las ventanas de OptimizedShell.", fontSmall,
                   style::textFaint, RectF(x0, (float)h - S(54), cw - S(170), (float)S(36)), StringAlignmentNear, true);
@@ -1016,7 +1052,8 @@ protected:
         for (int i = 0; i < PgCount; ++i) if (InRect(rc.at(HNav0 + i), x, y)) return HNav0 + i;
         switch (page) {
         case PgTheme:
-            for (int id : { HDark, HLight, HWindowsAccent, HTransparency, HReset }) if (InRect(rc.at(id), x, y)) return id;
+            for (int id : { HDark, HLight, HWindowsAccent, HBlur, HTaskOpacity, HWinOpacity, HReset })
+                if (InRect(rc.at(id), x, y)) return id;
             for (int i = 0; i < kPresetCount; ++i) if (InRect(rc.at(HSwatch0 + i), x, y)) return HSwatch0 + i;
             break;
         case PgWallpaper:
@@ -1051,7 +1088,13 @@ protected:
         case HDark: t.dark = true; break;
         case HLight: t.dark = false; break;
         case HWindowsAccent: t.accent = WindowsAccent(); break;
-        case HTransparency: t.transparency = !t.transparency; break;
+        case HBlur: t.blur = !t.blur; break;
+        case HTaskOpacity:
+            dragOpacity = 1; SetCapture(hwnd); liveOpacity = OpacityFromX(taskOpTrack, x);
+            InvalidateRectF(rc[HTaskOpacity]); return;
+        case HWinOpacity:
+            dragOpacity = 2; SetCapture(hwnd); liveOpacity = OpacityFromX(winOpTrack, x);
+            InvalidateRectF(rc[HWinOpacity]); return;
         case HReset: t = ThemeSettings(); break;
         // Fondo
         case HBrowse: BrowseWallpaper(); return;
@@ -1078,6 +1121,16 @@ protected:
     }
 
     void OnMouseUp(int, int) override {
+        if (dragOpacity) {
+            ReleaseCapture();
+            ThemeSettings t = g_theme;
+            if (dragOpacity == 1) t.taskbarOpacity = liveOpacity;
+            else t.windowOpacity = liveOpacity;
+            dragOpacity = 0;
+            if (!(t == g_theme)) ApplyTheme_(t);
+            else Invalidate();
+            return;
+        }
         if (dragBright) {
             dragBright = false;
             ReleaseCapture();
@@ -1086,6 +1139,11 @@ protected:
     }
 
     void OnMouseMove(int x, int y) override {
+        if (dragOpacity) {
+            liveOpacity = OpacityFromX(dragOpacity == 1 ? taskOpTrack : winOpTrack, x);
+            InvalidateRectF(rc[dragOpacity == 1 ? HTaskOpacity : HWinOpacity]);
+            return;
+        }
         if (dragBright) { SetBrightnessFromX(x); return; }
         int id = HitAt(x, y);
         if (id == hover) return;
