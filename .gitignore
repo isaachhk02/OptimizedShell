@@ -1,0 +1,7 @@
+# Binarios y objetos de compilación
+CppShell/bin/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
