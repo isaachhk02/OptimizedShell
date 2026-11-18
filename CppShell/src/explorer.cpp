@@ -685,7 +685,7 @@ protected:
             path = NormalizeDir(path);
             DWORD a = GetFileAttributesW(path.c_str());
             if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) {
-                MessageBoxW(hwnd, (L"No se puede acceder a \"" + path + L"\".\n\n" + ErrorText(GetLastError())).c_str(),
+                ui::MsgBox(hwnd, (L"No se puede acceder a \"" + path + L"\".\n\n" + ErrorText(GetLastError())).c_str(),
                             L"Archivos", MB_ICONWARNING);
                 return false;
             }
@@ -715,7 +715,7 @@ protected:
         if (a != INVALID_FILE_ATTRIBUTES) { Launch(p); UpdateAddress(); return; }
         // shell:downloads, URLs, comandos...
         if (!RunCommandLine(typed, hwnd))
-            MessageBoxW(hwnd, (L"No se encuentra \"" + typed + L"\".").c_str(), L"Archivos", MB_ICONWARNING);
+            ui::MsgBox(hwnd, (L"No se encuentra \"" + typed + L"\".").c_str(), L"Archivos", MB_ICONWARNING);
         UpdateAddress();
     }
 
@@ -1072,7 +1072,7 @@ protected:
         if (permanent) {
             std::wstring msg = paths.size() == 1 ? L"¿Eliminar permanentemente \"" + BaseName(paths[0]) + L"\"?"
                                                  : L"¿Eliminar permanentemente estos " + std::to_wstring(paths.size()) + L" elementos?";
-            if (MessageBoxW(hwnd, msg.c_str(), L"Eliminar", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+            if (ui::MsgBox(hwnd, msg.c_str(), L"Eliminar", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
         }
         RunFileOp(permanent ? FileOp::Delete : FileOp::Recycle, paths, L"", hwnd);
     }
@@ -1083,7 +1083,7 @@ protected:
         for (int n = 2; GetFileAttributesW(JoinPath(cur, name).c_str()) != INVALID_FILE_ATTRIBUTES; ++n)
             name = base + L" (" + std::to_wstring(n) + L")";
         if (!CreateDirectoryW(JoinPath(cur, name).c_str(), nullptr)) {
-            MessageBoxW(hwnd, ErrorText(GetLastError()).c_str(), L"Nueva carpeta", MB_ICONWARNING);
+            ui::MsgBox(hwnd, ErrorText(GetLastError()).c_str(), L"Nueva carpeta", MB_ICONWARNING);
             return;
         }
         // Añadirla ya (el vigilante también avisará y se ignorará el duplicado).
@@ -1161,10 +1161,10 @@ protected:
         SetFocus(hwnd);
         if (!newName.empty() && newName != oldName) {
             if (newName.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
-                MessageBoxW(hwnd, L"El nombre no puede contener ninguno de estos caracteres:\n\\ / : * ? \" < > |",
+                ui::MsgBox(hwnd, L"El nombre no puede contener ninguno de estos caracteres:\n\\ / : * ? \" < > |",
                             L"Cambiar nombre", MB_ICONWARNING);
             } else if (!MoveFileW(JoinPath(cur, oldName).c_str(), JoinPath(cur, newName).c_str())) {
-                MessageBoxW(hwnd, ErrorText(GetLastError()).c_str(), L"Cambiar nombre", MB_ICONWARNING);
+                ui::MsgBox(hwnd, ErrorText(GetLastError()).c_str(), L"Cambiar nombre", MB_ICONWARNING);
             } else {
                 for (auto& it : items)
                     if (_wcsicmp(it.name.c_str(), oldName.c_str()) == 0) {
@@ -1240,7 +1240,7 @@ protected:
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, 8, L"Propiedades\tAlt+Entrar");
         if (!drives) AppendMenuW(m, MF_STRING, 9, L"Más opciones...");
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         switch (cmd) {
         case 1: OpenSelection(); break;
@@ -1269,7 +1269,7 @@ protected:
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING | (!sortDesc ? MF_CHECKED : 0), 10, L"Ascendente");
         AppendMenuW(m, MF_STRING | (sortDesc ? MF_CHECKED : 0), 11, L"Descendente");
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         if (cmd >= 1 && cmd <= 4) { sortCol = cmd - 1; RebuildView(); }
         else if (cmd == 10 || cmd == 11) { sortDesc = cmd == 11; RebuildView(); }
@@ -1292,7 +1292,7 @@ protected:
             AppendMenuW(m, MF_STRING, 6, L"Copiar ruta de la carpeta");
             AppendMenuW(m, MF_STRING, 7, L"Propiedades");
         }
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         switch (cmd) {
         case 1: showHidden = !showHidden; RebuildView(); break;
@@ -1353,8 +1353,8 @@ protected:
         const wchar_t* navGlyphs[4] = { L"\uE72B", L"\uE72A", L"\uE74A", L"\uE72C" };
         for (int i = 0; i < 4; ++i)
             style::DrawToolButton(g, btns[BBack + i], navGlyphs[i], L"", hoverBtn == BBack + i, ButtonEnabled(BBack + i));
-        DrawRounded(g, addrRc, SF(6), C(255, 35, 40, 52), C(45, 255, 255, 255));
-        DrawRounded(g, searchRc, SF(6), C(255, 35, 40, 52), C(45, 255, 255, 255));
+        style::DrawField(g, addrRc, GetFocus() == addr);
+        style::DrawField(g, searchRc, GetFocus() == search);
         DrawTextStr(g, L"\uE721", fontIcon, style::textDim, RectF(searchRc.X + S(8), searchRc.Y, (float)S(20), searchRc.Height),
                     StringAlignmentCenter);
 
@@ -1366,13 +1366,13 @@ protected:
         for (auto& cg : cmdGlyphs) style::DrawToolButton(g, btns[cg.first], cg.second, L"", hoverBtn == cg.first, ButtonEnabled(cg.first));
         style::DrawToolButton(g, btns[BSort], L"\uE8CB", L"Ordenar", hoverBtn == BSort);
         style::DrawToolButton(g, btns[BHidden], showHidden ? L"\uE7B3" : L"\uED1A", L"Ver ocultos", hoverBtn == BHidden, true, showHidden);
-        HLine(g, 0, (float)w, navRc.Y - 1, C(30, 255, 255, 255));
+        HLine(g, 0, (float)w, navRc.Y - 1, style::separator);
 
         PaintNav(g);
         PaintList(g);
 
         // Barra de estado
-        HLine(g, 0, (float)w, statusRc.Y, C(30, 255, 255, 255));
+        HLine(g, 0, (float)w, statusRc.Y, style::separator);
         std::wstring status = std::to_wstring(view.size()) + (view.size() == 1 ? L" elemento" : L" elementos");
         auto rows = SelectedRows();
         if (!rows.empty()) {
@@ -1390,7 +1390,7 @@ protected:
     }
 
     void PaintNav(Graphics& g) {
-        FillRect(g, navRc, C(255, 19, 22, 30));
+        FillRect(g, navRc, style::navBg);
         for (int i = 0; i < (int)nav.size(); ++i) {
             const NavEntry& e = nav[i];
             if (e.rc.Y + e.rc.Height > navRc.Y + navRc.Height) break;
@@ -1400,14 +1400,14 @@ protected:
                 continue;
             }
             bool active = (e.path == L"::thispc") ? cur.empty() : (!cur.empty() && _wcsicmp(e.path.c_str(), cur.c_str()) == 0);
-            if (active) DrawRounded(g, e.rc, SF(5), C(70, 59, 130, 246));
+            if (active) DrawRounded(g, e.rc, SF(5), style::rowSelected);
             else if (i == hoverNav) DrawRounded(g, e.rc, SF(5), style::rowHover);
             if (Bitmap* b = SysIconBitmap(e.icon, S(16)))
                 g.DrawImage(b, e.rc.X + S(10), e.rc.Y + (e.rc.Height - S(16)) / 2, (float)S(16), (float)S(16));
             DrawTextStr(g, e.label, fontSmall, active ? style::text : style::textDim,
                         RectF(e.rc.X + S(34), e.rc.Y, e.rc.Width - S(40), e.rc.Height));
         }
-        Pen sep(C(30, 255, 255, 255), 1.0f);
+        Pen sep(style::separator, 1.0f);
         g.DrawLine(&sep, navRc.X + navRc.Width, navRc.Y, navRc.X + navRc.Width, navRc.Y + navRc.Height);
     }
 
@@ -1428,7 +1428,7 @@ protected:
                             RectF(ax, headerRc.Y, (float)S(14), headerRc.Height), StringAlignmentCenter);
             }
         }
-        HLine(g, headerRc.X, headerRc.X + headerRc.Width, headerRc.Y + headerRc.Height - 1, C(30, 255, 255, 255));
+        HLine(g, headerRc.X, headerRc.X + headerRc.Width, headerRc.Y + headerRc.Height - 1, style::separator);
 
         int vis = RowsVisible();
         int focus = FocusIndex();
@@ -1442,9 +1442,9 @@ protected:
             RectF rr(listRc.X + S(4), listRc.Y + row * RowH(), listRc.Width - S(4), (float)RowH() - S(2));
             if (rr.Y >= listRc.Y + listRc.Height) break;
             if (it.selected) DrawRounded(g, rr, SF(5), style::rowSelected);
-            else if (vi == dropRow) DrawRounded(g, rr, SF(5), C(60, 74, 222, 128), style::success);
+            else if (vi == dropRow) DrawRounded(g, rr, SF(5), WithAlpha(style::success, 50), style::success);
             else if (vi == hoverRow) DrawRounded(g, rr, SF(5), style::rowHover);
-            if (vi == focus && GetFocus() == hwnd) DrawRounded(g, rr, SF(5), Color(0, 0, 0, 0), C(120, 147, 197, 253));
+            if (vi == focus && GetFocus() == hwnd) DrawRounded(g, rr, SF(5), Color(0, 0, 0, 0), style::focusRing);
 
             if (it.icon == -2 && !it.requested) {
                 it.requested = true;
@@ -1727,6 +1727,11 @@ protected:
             RebuildView();
             Invalidate();
         }
+        // Borde de acento en la caja con el foco.
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            InvalidateRectF(addrRc);
+            InvalidateRectF(searchRc);
+        }
     }
 
     void OnDestroy() override;
@@ -1793,7 +1798,7 @@ protected:
                 HMENU m = CreatePopupMenu();
                 AppendMenuW(m, MF_STRING, 1, L"Abrir");
                 AppendMenuW(m, MF_STRING, 2, L"Abrir en una ventana nueva");
-                int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+                int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
                 DestroyMenu(m);
                 if (cmd == 1) Navigate(nav[ni].path);
                 else if (cmd == 2) Open(nav[ni].path == L"::thispc" ? L"" : nav[ni].path);
@@ -1936,7 +1941,7 @@ bool ExplorerWindow::Start(const std::wstring& path, const std::wstring& selectN
     int y = wa.top + (wa.bottom - wa.top - h) / 2 + offset;
     if (!Create(L"OShellCppExplorer", WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, w, h, L"Archivos"))
         return false;
-    EnableDarkFrame(hwnd);
+    SetFrame(FrameOpaque);
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
     SHSTOCKICONINFO sii = { sizeof(sii) };

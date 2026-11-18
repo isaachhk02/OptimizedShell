@@ -21,13 +21,14 @@ namespace {
 using namespace Gdiplus;
 using namespace ui;
 
-const Color kText(255, 238, 242, 248);
-const Color kTextDim(255, 158, 169, 188);
-const Color kTextFaint(255, 112, 124, 146);
-const Color kAccent(255, 96, 165, 250);
-const Color kRed(255, 252, 165, 165);
-const Color kAmber(255, 253, 224, 71);
-const Color kGreen(255, 74, 222, 128);
+// Colores de la tarjeta: referencias a los tokens del tema propio.
+const Color& kText = style::text;
+const Color& kTextDim = style::textDim;
+const Color& kTextFaint = style::textFaint;
+const Color& kAccent = style::accent;
+const Color& kRed = style::danger;
+const Color& kAmber = style::warning;
+const Color& kGreen = style::success;
 
 // --------------------------------------------------------------- usuarios
 std::vector<std::wstring> EnumLocalUsers() {
@@ -258,7 +259,7 @@ protected:
         g.FillRectangle(&overlay, 0, 0, w, h);
 
         // Resplandores suaves
-        SolidBrush glow1(C(30, 59, 130, 246));
+        SolidBrush glow1(WithAlpha(style::accentSolid, 30));
         g.FillEllipse(&glow1, (float)(w * 0.52), (float)(-h * 0.28), (float)(w * 0.62), (float)(h * 0.9));
         SolidBrush glow2(C(18, 139, 92, 246));
         g.FillEllipse(&glow2, (float)(-w * 0.18), (float)(h * 0.45), (float)(w * 0.55), (float)(h * 0.8));
@@ -312,13 +313,13 @@ protected:
     // ----------------------------------------------------------- pintura
     void DrawField(Graphics& g, const RectF& rc, const std::wstring& value,
                    const std::wstring& placeholder, bool isPassword, bool focused) {
-        DrawRounded(g, rc, SF(7), C(255, 30, 35, 46),
-                    focused ? kAccent : C(55, 255, 255, 255), focused ? 1.3f : 1.0f);
+        DrawRounded(g, rc, SF(7), style::controlBg,
+                    focused ? kAccent : style::controlBorder, focused ? 1.3f : 1.0f);
         std::wstring shown = value;
         if (isPassword && !value.empty()) shown.assign(value.size(), L'\u25CF');
 
         g.SetClip(rc);
-        Color fg = value.empty() ? kTextFaint : RGBc(246, 248, 252);
+        Color fg = value.empty() ? kTextFaint : style::text;
         std::wstring text = value.empty() ? placeholder : shown;
         float tx = rc.X + SF(13);
         float textW = 0;
@@ -343,19 +344,19 @@ protected:
 
     void DrawAvatar(Graphics& g, float cx, float cy, float r, const std::wstring& name) {
         LinearGradientBrush grad(PointF(cx - r, cy - r), PointF(cx + r, cy + r),
-                                 C(255, 96, 165, 250), C(255, 37, 99, 235));
+                                 style::accentHover, style::accentSolid);
         g.FillEllipse(&grad, cx - r, cy - r, r * 2, r * 2);
         DrawCircle(g, cx, cy, r, hoverAvatar ? C(180, 255, 255, 255) : C(90, 255, 255, 255), 1.4f);
         DrawTextStr(g, InitialOf(name), fontAvatar,
-                    RGBc(255, 255, 255),
+                    style::onAccent,
                     RectF(cx - r, cy - r - SF(2), r * 2, r * 2), StringAlignmentCenter);
     }
 
     void DrawPower(Graphics& g, int index, const wchar_t* glyph, const wchar_t* label) {
         const RectF& rc = L.power[index];
         bool hov = hoverPower == index;
-        DrawRounded(g, rc, SF(6), hov ? C(255, 38, 44, 58) : C(235, 20, 24, 33),
-                    C(50, 255, 255, 255));
+        DrawRounded(g, rc, SF(6), hov ? style::controlHover : WithAlpha(style::controlBg, 235),
+                    style::controlBorder);
         DrawTextStr(g, glyph, fontIcon, kTextDim,
                     RectF(rc.X + S(8), rc.Y, S(18), rc.Height), StringAlignmentCenter);
         DrawTextStr(g, label, fontSmall, hov ? kText : kTextDim,
@@ -379,12 +380,12 @@ protected:
         // Sombra y tarjeta
         DrawRounded(g, RectF(L.card.X + S(2), L.card.Y + S(7), L.card.Width, L.card.Height),
                     SF(16), C(95, 0, 0, 0));
-        DrawRounded(g, L.card, SF(16), C(232, 22, 27, 37), C(62, 255, 255, 255));
+        DrawRounded(g, L.card, SF(16), WithAlpha(style::dialogBg, 236), style::cardBorder);
 
         if (success) {
             float cx = L.card.X + L.card.Width / 2;
             float cy = L.card.Y + S(154);
-            FillCircle(g, cx, cy, S(46), C(255, 30, 58, 46));
+            FillCircle(g, cx, cy, S(46), WithAlpha(style::success, 40));
             DrawCircle(g, cx, cy, S(46), kGreen, 2.0f);
             DrawCheck(g, cx, cy, S(46), kGreen, 4.0f);
             DrawTextStr(g, L"Bienvenido", fontTitle, kText,
@@ -421,8 +422,8 @@ protected:
         // Botón principal
         {
             bool hov = hoverLogin > 0 && !busy;
-            Color c1 = busy ? C(255, 48, 61, 82) : (hov ? C(255, 96, 165, 250) : C(255, 59, 130, 246));
-            Color c2 = busy ? C(255, 40, 51, 69) : (hov ? C(255, 59, 130, 246) : C(255, 37, 99, 235));
+            Color c1 = busy ? style::controlHover : (hov ? style::accentHover : style::accentSolid);
+            Color c2 = busy ? style::controlBg : Mix(hov ? style::accentHover : style::accentSolid, Color(255, 0, 0, 0), 0.15f);
             LinearGradientBrush grad(PointF(L.login.X, L.login.Y),
                                      PointF(L.login.X + L.login.Width, L.login.Y + L.login.Height),
                                      c1, c2);
@@ -435,10 +436,10 @@ protected:
             path.CloseFigure();
             g.FillPath(&grad, &path);
             std::wstring label = busy ? L"Comprobando..." : L"Iniciar sesión";
-            DrawTextStr(g, label, fontBold, RGBc(255, 255, 255), L.login, StringAlignmentCenter);
+            DrawTextStr(g, label, fontBold, style::onAccent, L.login, StringAlignmentCenter);
             if (busy) {
                 float t = (float)((GetTickCount64() / 12) % 360);
-                Pen p(RGBc(255, 255, 255), 2.0f);
+                Pen p(style::onAccent, 2.0f);
                 g.DrawArc(&p, L.login.X + L.login.Width / 2 - S(60), L.login.Y + S(12),
                           (float)S(22), (float)S(22), t, 250.0f);
             }
@@ -475,7 +476,7 @@ protected:
         POINT pt;
         GetCursorPos(&pt);
         SetForegroundWindow(hwnd);
-        int cmd = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        int cmd = ui::ThemedMenu(menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
                                  pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(menu);
         userMenuOpen = false;
@@ -553,11 +554,11 @@ protected:
 
     void DoPower(int index) {
         if (index == 0) {
-            if (MessageBoxW(hwnd, L"¿Apagar el equipo?", L"Energía",
+            if (ui::MsgBox(hwnd, L"¿Apagar el equipo?", L"Energía",
                             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES)
                 ExitWindowsEx(EWX_POWEROFF | EWX_FORCEIFHUNG, 0);
         } else if (index == 1) {
-            if (MessageBoxW(hwnd, L"¿Reiniciar el equipo?", L"Energía",
+            if (ui::MsgBox(hwnd, L"¿Reiniciar el equipo?", L"Energía",
                             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES)
                 ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, 0);
         } else {
@@ -740,7 +741,7 @@ int RunLogonUIMode(bool demo, bool lockMode) {
         LogonWindow wnd(demo, lockMode);
         if (!wnd.Start()) {
             ui::ShutdownUi();
-            MessageBoxW(nullptr, L"No se pudo abrir la pantalla de inicio de sesión.",
+            ui::MsgBox(nullptr, L"No se pudo abrir la pantalla de inicio de sesión.",
                         L"OptimizedShell", MB_ICONERROR | MB_OK);
             return 1;
         }

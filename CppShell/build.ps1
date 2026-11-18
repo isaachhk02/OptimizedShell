@@ -11,7 +11,7 @@ $out = Join-Path $PSScriptRoot 'bin'
 New-Item -ItemType Directory -Path $out -Force | Out-Null
 
 $src = Join-Path $PSScriptRoot 'src'
-$sources = @('shell.cpp', 'taskmgr.cpp', 'explorer.cpp', 'logonui.cpp' | ForEach-Object { '"' + (Join-Path $src $_) + '"' }) -join ' '
+$sources = @('shell.cpp', 'taskmgr.cpp', 'explorer.cpp', 'settings.cpp', 'logonui.cpp' | ForEach-Object { '"' + (Join-Path $src $_) + '"' }) -join ' '
 
 $libs = @(
     'user32.lib', 'gdi32.lib', 'gdiplus.lib', 'shell32.lib', 'ole32.lib', 'oleaut32.lib',

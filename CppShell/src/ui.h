@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
@@ -65,13 +66,248 @@ inline Font* fontIcon = nullptr;
 // Recursos GDI para controles EDIT nativos (barra de direcciones, búsqueda, renombrar).
 inline HFONT hfontBody = nullptr;
 inline HBRUSH hbrEdit = nullptr;
-inline const COLORREF kEditBg = RGB(35, 40, 52);
-inline const COLORREF kEditFg = RGB(232, 236, 244);
 
 inline int S(int v) { return MulDiv(v, g_dpi, 96); }
 inline float SF(float v) { return v * (float)g_dpi / 96.0f; }
 inline Color C(BYTE a, BYTE r, BYTE g, BYTE b) { return Color(a, r, g, b); }
 inline Color RGBc(BYTE r, BYTE g, BYTE b) { return Color(255, r, g, b); }
+
+// ------------------------------------------------------------ tema
+// Todos los colores de la interfaz salen de estos tokens. ApplyTheme() los
+// rellena a partir de la configuración (modo claro/oscuro, acento, transparencia),
+// así que shell, explorador, Administrador de tareas, menús y diálogos comparten tema.
+namespace style {
+inline bool dark = true;
+inline bool transparency = true;
+inline Color windowBg, titleBg, cardBg, cardBorder, text, textDim, textFaint;
+inline Color accent, accentSolid, accentHover, onAccent, rowSelected, focusRing;
+inline Color danger, success, warning, closeHover;
+inline Color rowHover, controlBg, controlHover, controlBorder, separator, navBg, dialogBg;
+inline Color menuBg, menuHover, menuBorder;
+inline Color taskbarBg, taskButton, taskButtonHover, taskButtonActive, flyoutBg, flyoutBorder;
+inline Color graphBg, gridLine, track;
+inline COLORREF editBg = RGB(35, 40, 52), editFg = RGB(232, 236, 244);
+inline DWORD taskbarTint = 0, flyoutTint = 0; // AABBGGRR para el acrílico de DWM
+} // namespace style
+
+struct ThemeSettings {
+    bool dark = true;
+    COLORREF accent = RGB(59, 130, 246);
+    bool transparency = true;
+    bool operator==(const ThemeSettings& o) const {
+        return dark == o.dark && accent == o.accent && transparency == o.transparency;
+    }
+};
+
+struct AccentPreset {
+    COLORREF color;
+    const wchar_t* name;
+};
+
+inline const AccentPreset kAccentPresets[] = {
+    { RGB(59, 130, 246), L"Azul" },    { RGB(14, 165, 233), L"Cielo" },   { RGB(20, 184, 166), L"Turquesa" },
+    { RGB(34, 197, 94), L"Verde" },    { RGB(132, 204, 22), L"Lima" },    { RGB(234, 179, 8), L"Ámbar" },
+    { RGB(249, 115, 22), L"Naranja" }, { RGB(239, 68, 68), L"Rojo" },     { RGB(236, 72, 153), L"Rosa" },
+    { RGB(139, 92, 246), L"Violeta" }, { RGB(100, 116, 139), L"Pizarra" },
+};
+
+inline ThemeSettings g_theme;
+
+inline std::wstring ConfigDir() {
+    wchar_t buf[MAX_PATH] = {};
+    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, buf);
+    std::wstring dir = std::wstring(buf) + L"\\OptimizedShell";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+inline std::wstring ThemeFile() { return ConfigDir() + L"\\theme.ini"; }
+
+inline ThemeSettings LoadThemeSettings() {
+    ThemeSettings t;
+    std::wstring file = ThemeFile();
+    wchar_t buf[64] = {};
+    GetPrivateProfileStringW(L"Tema", L"Modo", L"oscuro", buf, 64, file.c_str());
+    t.dark = _wcsicmp(buf, L"claro") != 0;
+    GetPrivateProfileStringW(L"Tema", L"Acento", L"3B82F6", buf, 64, file.c_str());
+    unsigned long rgb = wcstoul(buf, nullptr, 16);
+    t.accent = RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    t.transparency = GetPrivateProfileIntW(L"Tema", L"Transparencia", 1, file.c_str()) != 0;
+    return t;
+}
+
+inline void SaveThemeSettings(const ThemeSettings& t) {
+    std::wstring file = ThemeFile();
+    wchar_t hex[16];
+    swprintf_s(hex, L"%02X%02X%02X", GetRValue(t.accent), GetGValue(t.accent), GetBValue(t.accent));
+    WritePrivateProfileStringW(L"Tema", L"Modo", t.dark ? L"oscuro" : L"claro", file.c_str());
+    WritePrivateProfileStringW(L"Tema", L"Acento", hex, file.c_str());
+    WritePrivateProfileStringW(L"Tema", L"Transparencia", t.transparency ? L"1" : L"0", file.c_str());
+}
+
+inline Color Mix(const Color& a, const Color& b, float t, BYTE alpha = 255) {
+    auto m = [t](BYTE x, BYTE y) { return (BYTE)(x + (y - x) * t + 0.5f); };
+    return Color(alpha, m(a.GetR(), b.GetR()), m(a.GetG(), b.GetG()), m(a.GetB(), b.GetB()));
+}
+
+inline Color WithAlpha(const Color& c, BYTE a) { return Color(a, c.GetR(), c.GetG(), c.GetB()); }
+
+inline Color FromRef(COLORREF c, BYTE a = 255) { return Color(a, GetRValue(c), GetGValue(c), GetBValue(c)); }
+
+// Color de acento actual de Windows (para "Usar el color de Windows").
+inline COLORREF WindowsAccent() {
+    DWORD argb = 0;
+    BOOL opaque = FALSE;
+    if (SUCCEEDED(DwmGetColorizationColor(&argb, &opaque)))
+        return RGB((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
+    return RGB(59, 130, 246);
+}
+
+// Tooltips registrados en este proceso (se recolorean al cambiar el tema).
+inline std::vector<HWND>& ThemedTips() {
+    static std::vector<HWND> tips;
+    return tips;
+}
+
+inline void ThemeTooltip(HWND tip) {
+    SetWindowTheme(tip, L"", L""); // sin estilo visual: así respeta los colores propios
+    SendMessageW(tip, TTM_SETTIPBKCOLOR, RGB(style::menuBg.GetR(), style::menuBg.GetG(), style::menuBg.GetB()), 0);
+    SendMessageW(tip, TTM_SETTIPTEXTCOLOR, RGB(style::text.GetR(), style::text.GetG(), style::text.GetB()), 0);
+    RECT m = { 6, 4, 6, 4 };
+    SendMessageW(tip, TTM_SETMARGIN, 0, (LPARAM)&m);
+}
+
+// Menús nativos que siguen existiendo (menú contextual de extensiones de shell).
+inline void SetNativeMenuMode(bool dark) {
+    static HMODULE ux = LoadLibraryW(L"uxtheme.dll");
+    if (!ux) return;
+    typedef int(WINAPI* PFN_SetPreferredAppMode)(int);
+    typedef void(WINAPI* PFN_FlushMenuThemes)();
+    auto setMode = (PFN_SetPreferredAppMode)GetProcAddress(ux, MAKEINTRESOURCEA(135));
+    auto flush = (PFN_FlushMenuThemes)GetProcAddress(ux, MAKEINTRESOURCEA(136));
+    if (setMode) setMode(dark ? 2 : 3); // ForceDark / ForceLight
+    if (flush) flush();
+}
+
+inline void ApplyTheme(const ThemeSettings& t) {
+    using namespace style;
+    g_theme = t;
+    dark = t.dark;
+    transparency = t.transparency;
+    Color a = FromRef(t.accent);
+    Color white(255, 255, 255, 255), black(255, 0, 0, 0);
+    float lum = (0.299f * a.GetR() + 0.587f * a.GetG() + 0.114f * a.GetB()) / 255.0f;
+
+    if (dark) {
+        windowBg = Color(transparency ? 247 : 255, 17, 20, 27);
+        titleBg = RGBc(23, 27, 36);
+        cardBg = RGBc(27, 31, 41);
+        cardBorder = C(40, 255, 255, 255);
+        text = RGBc(232, 236, 244);
+        textDim = RGBc(148, 160, 178);
+        textFaint = RGBc(105, 116, 136);
+        danger = RGBc(248, 113, 113);
+        success = RGBc(74, 222, 128);
+        warning = RGBc(251, 191, 36);
+        rowHover = RGBc(34, 39, 51);
+        controlBg = RGBc(35, 40, 52);
+        controlHover = RGBc(44, 50, 64);
+        controlBorder = C(45, 255, 255, 255);
+        separator = C(30, 255, 255, 255);
+        navBg = RGBc(19, 22, 30);
+        dialogBg = RGBc(20, 23, 31);
+        menuBg = RGBc(30, 34, 44);
+        menuHover = RGBc(48, 54, 68);
+        menuBorder = C(60, 255, 255, 255);
+        taskbarBg = Color(transparency ? 150 : 255, 16, 18, 24);
+        taskButton = RGBc(28, 31, 40);
+        taskButtonHover = RGBc(38, 42, 54);
+        taskButtonActive = RGBc(46, 51, 66);
+        flyoutBg = Color(transparency ? 246 : 255, 21, 24, 32);
+        flyoutBorder = C(65, 255, 255, 255);
+        graphBg = RGBc(22, 26, 35);
+        gridLine = C(18, 255, 255, 255);
+        track = C(60, 255, 255, 255);
+        editBg = RGB(35, 40, 52);
+        editFg = RGB(232, 236, 244);
+        taskbarTint = 0xE614161C;
+        flyoutTint = 0xF214161C;
+        accent = Mix(a, white, 0.18f);
+        accentHover = Mix(a, white, 0.12f);
+        rowSelected = WithAlpha(a, 90);
+    } else {
+        windowBg = Color(transparency ? 250 : 255, 247, 248, 250);
+        titleBg = RGBc(237, 239, 243);
+        cardBg = RGBc(255, 255, 255);
+        cardBorder = C(36, 0, 0, 0);
+        text = RGBc(26, 30, 38);
+        textDim = RGBc(78, 88, 104);
+        textFaint = RGBc(124, 132, 146);
+        danger = RGBc(220, 38, 38);
+        success = RGBc(22, 163, 74);
+        warning = RGBc(202, 138, 4);
+        rowHover = RGBc(230, 233, 239);
+        controlBg = RGBc(255, 255, 255);
+        controlHover = RGBc(234, 237, 242);
+        controlBorder = C(48, 0, 0, 0);
+        separator = C(26, 0, 0, 0);
+        navBg = RGBc(240, 242, 245);
+        dialogBg = RGBc(249, 250, 251);
+        menuBg = RGBc(252, 252, 253);
+        menuHover = RGBc(229, 233, 240);
+        menuBorder = C(45, 0, 0, 0);
+        taskbarBg = Color(transparency ? 175 : 255, 238, 240, 244);
+        taskButton = RGBc(226, 229, 235);
+        taskButtonHover = RGBc(214, 219, 227);
+        taskButtonActive = RGBc(250, 251, 252);
+        flyoutBg = Color(transparency ? 244 : 255, 248, 249, 251);
+        flyoutBorder = C(45, 0, 0, 0);
+        graphBg = RGBc(255, 255, 255);
+        gridLine = C(20, 0, 0, 0);
+        track = C(45, 0, 0, 0);
+        editBg = RGB(255, 255, 255);
+        editFg = RGB(26, 30, 38);
+        taskbarTint = 0xD8F4F2F0;
+        flyoutTint = 0xEEFAF9F8;
+        accent = Mix(a, black, 0.12f);
+        accentHover = Mix(a, black, 0.08f);
+        rowSelected = WithAlpha(a, 60);
+    }
+    accentSolid = a;
+    if (!dark) accentHover = Mix(a, black, 0.1f);
+    else accentHover = Mix(a, white, 0.12f);
+    onAccent = lum > 0.68f ? RGBc(20, 20, 24) : white;
+    focusRing = WithAlpha(accent, 150);
+    closeHover = RGBc(196, 43, 43);
+
+    if (hbrEdit) DeleteObject(hbrEdit);
+    hbrEdit = CreateSolidBrush(editBg);
+    SetNativeMenuMode(dark);
+    auto& tips = ThemedTips();
+    tips.erase(std::remove_if(tips.begin(), tips.end(), [](HWND h) { return !IsWindow(h); }), tips.end());
+    for (HWND tip : tips) ThemeTooltip(tip);
+}
+
+// Mensaje que se difunde a todas las ventanas cuando cambia el tema.
+inline UINT ThemeMessage() {
+    static UINT m = RegisterWindowMessageW(L"OptimizedShell.ThemeChanged");
+    return m;
+}
+
+// Relee theme.ini; true si ha cambiado algo.
+inline bool ReloadTheme() {
+    ThemeSettings t = LoadThemeSettings();
+    if (t == g_theme && hbrEdit) return false;
+    ApplyTheme(t);
+    return true;
+}
+
+// Guarda, aplica en este proceso y avisa al resto de ventanas de OptimizedShell.
+inline void SetTheme(const ThemeSettings& t) {
+    SaveThemeSettings(t);
+    ApplyTheme(t);
+    SendNotifyMessageW(HWND_BROADCAST, ThemeMessage(), 0, 0);
+}
 
 // ------------------------------------------------------------ inicialización
 inline void InitUi(HINSTANCE inst) {
@@ -103,18 +339,11 @@ inline void InitUi(HINSTANCE inst) {
     lf.lfQuality = CLEARTYPE_QUALITY;
     wcscpy_s(lf.lfFaceName, L"Segoe UI");
     hfontBody = CreateFontIndirectW(&lf);
-    hbrEdit = CreateSolidBrush(kEditBg);
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
 
-    // Menús contextuales en tema oscuro (Windows 10 1809+).
-    HMODULE ux = LoadLibraryW(L"uxtheme.dll");
-    if (ux) {
-        typedef int(WINAPI* PFN_SetPreferredAppMode)(int);
-        auto setMode = (PFN_SetPreferredAppMode)GetProcAddress(ux, MAKEINTRESOURCEA(135));
-        if (setMode) setMode(2); // ForceDark
-    }
+    ApplyTheme(LoadThemeSettings());
 }
 
 inline void ShutdownUi() {
@@ -161,33 +390,42 @@ typedef struct _WINDOWCOMPOSITIONATTRIBDATA {
 
 typedef BOOL(WINAPI* PFN_SetWindowCompositionAttribute)(HWND, WINDOWCOMPOSITIONATTRIBDATA*);
 
-// Marco oscuro con esquinas redondeadas, sin blur (ventanas opacas con controles hijos).
-inline void EnableDarkFrame(HWND hwnd) {
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE
-    int pref = 2;                                           // DWMWCP_ROUND
-    DwmSetWindowAttribute(hwnd, 33, &pref, sizeof(pref));
-}
-
-inline void EnableBlur(HWND hwnd, DWORD gradient) {
+inline void SetAccentPolicy(HWND hwnd, ACCENT_STATE state, DWORD gradient) {
     static PFN_SetWindowCompositionAttribute setAttr = nullptr;
     if (!setAttr) {
         HMODULE user32 = GetModuleHandleW(L"user32.dll");
         if (user32) setAttr = (PFN_SetWindowCompositionAttribute)GetProcAddress(user32, "SetWindowCompositionAttribute");
     }
-    if (setAttr) {
-        ACCENT_POLICY policy = {};
-        policy.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND;
-        policy.AccentFlags = 2;
-        policy.GradientColor = gradient;
-        WINDOWCOMPOSITIONATTRIBDATA data = {};
-        data.Attribute = 19; // WCA_ACCENT_POLICY
-        data.Data = &policy;
-        data.SizeOfData = sizeof(policy);
-        setAttr(hwnd, &data);
-    }
-    EnableDarkFrame(hwnd);
+    if (!setAttr) return;
+    ACCENT_POLICY policy = {};
+    policy.AccentState = state;
+    policy.AccentFlags = 2;
+    policy.GradientColor = gradient;
+    WINDOWCOMPOSITIONATTRIBDATA data = {};
+    data.Attribute = 19; // WCA_ACCENT_POLICY
+    data.Data = &policy;
+    data.SizeOfData = sizeof(policy);
+    setAttr(hwnd, &data);
 }
+
+// Tipos de marco: opaco (ventanas con controles), acrílico (barra/paneles) o menú.
+enum FrameKind { FrameNone = 0, FrameOpaque, FrameTaskbar, FrameFlyout, FrameMenu };
+
+inline void ApplyFrame(HWND hwnd, FrameKind kind) {
+    if (!hwnd || kind == FrameNone) return;
+    BOOL dark = style::dark;
+    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE
+    int pref = kind == FrameTaskbar ? 1 : (kind == FrameMenu ? 3 : 2); // sin redondear / pequeño / normal
+    DwmSetWindowAttribute(hwnd, 33, &pref, sizeof(pref));
+    if (kind == FrameTaskbar || kind == FrameFlyout) {
+        bool acrylic = style::transparency;
+        SetAccentPolicy(hwnd, acrylic ? ACCENT_ENABLE_ACRYLICBLURBEHIND : ACCENT_DISABLED,
+                        kind == FrameTaskbar ? style::taskbarTint : style::flyoutTint);
+    }
+}
+
+// Compatibilidad: marco opaco con el tema actual.
+inline void EnableDarkFrame(HWND hwnd) { ApplyFrame(hwnd, FrameOpaque); }
 
 // ------------------------------------------------------------ eficiencia del proceso
 // EcoQoS: Windows programa el proceso en núcleos/frecuencias de bajo consumo.
@@ -421,7 +659,7 @@ inline HWND CreateDarkEdit(HWND parent, int id, const wchar_t* cue) {
     HWND e = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                              0, 0, 10, 10, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
     SendMessageW(e, WM_SETFONT, (WPARAM)hfontBody, TRUE);
-    SetWindowTheme(e, L"DarkMode_CFD", nullptr);
+    SetWindowTheme(e, style::dark ? L"DarkMode_CFD" : L"CFD", nullptr);
     if (cue) SendMessageW(e, EM_SETCUEBANNER, TRUE, (LPARAM)cue);
     SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(2), S(2)));
     return e;
@@ -430,8 +668,8 @@ inline HWND CreateDarkEdit(HWND parent, int id, const wchar_t* cue) {
 // Responde a WM_CTLCOLOREDIT con colores del tema oscuro.
 inline LRESULT CtlColorEdit(WPARAM wp) {
     HDC dc = (HDC)wp;
-    SetTextColor(dc, kEditFg);
-    SetBkColor(dc, kEditBg);
+    SetTextColor(dc, style::editFg);
+    SetBkColor(dc, style::editBg);
     return (LRESULT)hbrEdit;
 }
 
@@ -486,7 +724,8 @@ struct HoverTip {
                               CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                               o, nullptr, g_hInst, nullptr);
         if (!tip) return;
-        SetWindowTheme(tip, L"DarkMode_Explorer", nullptr);
+        ThemeTooltip(tip);
+        ThemedTips().push_back(tip);
         TTTOOLINFOW ti = { sizeof(ti) };
         ti.uFlags = TTF_SUBCLASS;
         ti.hwnd = o;
@@ -698,10 +937,10 @@ inline bool InRect(const RectF& r, int x, int y) {
 // Barra de desplazamiento fina (solo indicador).
 inline void DrawScrollbar(Graphics& g, const RectF& track, int total, int visible, int offset) {
     if (total <= visible || total <= 0) return;
-    DrawRounded(g, track, track.Width / 2, C(25, 255, 255, 255));
+    DrawRounded(g, track, track.Width / 2, style::separator);
     float thumbH = std::max((float)S(26), track.Height * (float)visible / (float)total);
     float thumbY = track.Y + (track.Height - thumbH) * (float)offset / (float)std::max(1, total - visible);
-    DrawRounded(g, RectF(track.X, thumbY, track.Width, thumbH), track.Width / 2, C(90, 255, 255, 255));
+    DrawRounded(g, RectF(track.X, thumbY, track.Width, thumbH), track.Width / 2, WithAlpha(style::textFaint, 170));
 }
 
 // Fondo desenfocado a partir del wallpaper: se reduce y se vuelve a escalar.
@@ -727,25 +966,10 @@ inline Bitmap* CreateBlurredWallpaper(int w, int h, int downscale = 16) {
 }
 
 // ------------------------------------------------------------ estilo propio
-// Estilo de ventana inspirado en el Explorador de Windows 11:
-// fondo oscuro, esquinas redondeadas, barra de título propia y
-// botones de ventana dibujados a mano.
+// Estilo de ventana inspirado en el Explorador de Windows 11: esquinas
+// redondeadas, barra de título propia y botones de ventana dibujados a mano.
+// Todos los colores salen de los tokens del tema (ver ApplyTheme).
 namespace style {
-
-inline const Color windowBg(247, 17, 20, 27);
-inline const Color titleBg(255, 23, 27, 36);
-inline const Color cardBg(255, 27, 31, 41);
-inline const Color cardBorder(40, 255, 255, 255);
-inline const Color text(255, 232, 236, 244);
-inline const Color textDim(255, 148, 160, 178);
-inline const Color textFaint(255, 105, 116, 136);
-inline const Color accent(255, 76, 141, 255);
-inline const Color accentSolid(255, 59, 130, 246);
-inline const Color danger(255, 248, 113, 113);
-inline const Color success(255, 74, 222, 128);
-inline const Color warning(255, 251, 191, 36);
-inline const Color rowHover(255, 34, 39, 51);
-inline const Color rowSelected(90, 59, 130, 246);
 
 struct Chrome {
     RectF min, max, close;
@@ -767,25 +991,23 @@ inline Chrome DrawChrome(Graphics& g, int w, int h, const std::wstring& title,
     float titleH = (float)S(42);
 
     g.Clear(C(0, 0, 0, 0));
-    DrawRounded(g, RectF(0, 0, (float)w, (float)h), maximized ? 0.0f : SF(10), windowBg, C(55, 255, 255, 255));
+    DrawRounded(g, RectF(0, 0, (float)w, (float)h), maximized ? 0.0f : SF(10), windowBg, cardBorder);
     SolidBrush tb(titleBg);
     g.FillRectangle(&tb, 0.0f, 0.0f, (float)w, titleH);
-    HLine(g, 0.0f, (float)w, titleH - 1, C(35, 255, 255, 255));
+    HLine(g, 0.0f, (float)w, titleH - 1, separator);
 
     RectF ic((float)S(14), (float)S(11), (float)S(20), (float)S(20));
     DrawRounded(g, ic, SF(4), accentSolid);
-    DrawTextStr(g, glyph, fontIcon, RGBc(255, 255, 255), ic, StringAlignmentCenter);
-    DrawTextStr(g, title, fontBold, text,
-                RectF((float)S(42), 0, (float)w - S(200), titleH));
+    DrawTextStr(g, glyph, fontIcon, onAccent, ic, StringAlignmentCenter);
+    DrawTextStr(g, title, fontBold, text, RectF((float)S(42), 0, (float)w - S(200), titleH));
 
     auto button = [&](const RectF& rc, const wchar_t* gl, int id, bool close) {
         bool hov = hoverBtn == id;
         if (hov) {
-            SolidBrush b(close ? C(255, 196, 43, 43) : C(255, 44, 50, 64));
+            SolidBrush b(close ? closeHover : controlHover);
             g.FillRectangle(&b, rc);
         }
-        DrawTextStr(g, gl, fontIcon, hov && close ? RGBc(255, 255, 255) : textDim,
-                    rc, StringAlignmentCenter);
+        DrawTextStr(g, gl, fontIcon, hov && close ? RGBc(255, 255, 255) : textDim, rc, StringAlignmentCenter);
     };
     button(c.min, L"", 1, false);
     button(c.max, maximized ? L"" : L"", 2, false);
@@ -803,29 +1025,23 @@ inline FlyoutChrome DrawFlyoutChrome(Graphics& g, int w, int h, const std::wstri
     c.close = RectF((float)w - S(38), (float)S(8), (float)S(28), (float)S(28));
 
     g.Clear(C(0, 0, 0, 0));
-    DrawRounded(g, RectF(0, 0, (float)w, (float)h), SF(12), C(246, 21, 24, 32),
-                C(65, 255, 255, 255));
+    DrawRounded(g, RectF(0, 0, (float)w, (float)h), SF(12), flyoutBg, flyoutBorder);
 
     RectF ic((float)S(16), (float)S(11), (float)S(20), (float)S(20));
     DrawRounded(g, ic, SF(5), accentSolid);
-    DrawTextStr(g, glyph, fontIcon, RGBc(255, 255, 255), ic, StringAlignmentCenter);
-    DrawTextStr(g, title, fontBold, text,
-                RectF((float)S(44), (float)S(6), (float)w - S(90), (float)S(30)));
-    if (hoverClose) DrawRounded(g, c.close, SF(5), C(255, 196, 43, 43));
-    DrawTextStr(g, L"", fontIcon, hoverClose ? RGBc(255, 255, 255) : textDim,
-                c.close, StringAlignmentCenter);
+    DrawTextStr(g, glyph, fontIcon, onAccent, ic, StringAlignmentCenter);
+    DrawTextStr(g, title, fontBold, text, RectF((float)S(44), (float)S(6), (float)w - S(90), (float)S(30)));
+    if (hoverClose) DrawRounded(g, c.close, SF(5), closeHover);
+    DrawTextStr(g, L"", fontIcon, hoverClose ? RGBc(255, 255, 255) : textDim, c.close, StringAlignmentCenter);
     return c;
 }
 
 inline void DrawSwitch(Graphics& g, const RectF& rc, bool on, bool hover) {
-    DrawRounded(g, rc, rc.Height / 2.0f,
-                on ? accentSolid : C(255, 48, 54, 68),
-                on ? Color(0, 0, 0, 0) : C(80, 255, 255, 255));
+    DrawRounded(g, rc, rc.Height / 2.0f, on ? (hover ? accentHover : accentSolid) : (hover ? controlHover : controlBg),
+                on ? Color(0, 0, 0, 0) : WithAlpha(textDim, 160));
     float knob = rc.Height - SF(6);
     float x = on ? rc.X + rc.Width - knob - SF(3) : rc.X + SF(3);
-    FillCircle(g, x + knob / 2, rc.Y + rc.Height / 2, knob / 2,
-               on ? RGBc(255, 255, 255) : C(255, 170, 180, 196));
-    (void)hover;
+    FillCircle(g, x + knob / 2, rc.Y + rc.Height / 2, knob / 2, on ? onAccent : textDim);
 }
 
 inline void DrawLink(Graphics& g, const RectF& rc, const std::wstring& label, bool hover) {
@@ -833,20 +1049,27 @@ inline void DrawLink(Graphics& g, const RectF& rc, const std::wstring& label, bo
 }
 
 inline void DrawProgress(Graphics& g, const RectF& rc, float progress, const Color& color) {
-    DrawRounded(g, rc, rc.Height / 2.0f, C(60, 255, 255, 255));
+    DrawRounded(g, rc, rc.Height / 2.0f, track);
     if (progress < 0) progress = 0;
     if (progress > 1) progress = 1;
     if (progress > 0)
-        DrawRounded(g, RectF(rc.X, rc.Y, rc.Width * progress, rc.Height),
-                    rc.Height / 2.0f, color);
+        DrawRounded(g, RectF(rc.X, rc.Y, rc.Width * progress, rc.Height), rc.Height / 2.0f, color);
+}
+
+// Casilla de verificación con etiqueta.
+inline void DrawCheckbox(Graphics& g, const RectF& r, bool on, const std::wstring& label) {
+    RectF b(r.X, r.Y + (r.Height - S(18)) / 2, (float)S(18), (float)S(18));
+    DrawRounded(g, b, SF(4), on ? accentSolid : controlBg, on ? Color(0, 0, 0, 0) : WithAlpha(textDim, 170));
+    if (on) DrawCheck(g, b.X + b.Width / 2, b.Y + b.Height / 2, b.Width * 0.6f, onAccent, SF(1.8f));
+    DrawTextStr(g, label, fontSmall, text, RectF(b.X + S(26), r.Y, r.Width - S(26), r.Height));
 }
 
 // Botón de barra de herramientas: glifo MDL2 + texto opcional.
 inline void DrawToolButton(Graphics& g, const RectF& rc, const wchar_t* glyph, const std::wstring& label,
                            bool hover, bool enabled = true, bool active = false) {
-    if (active) DrawRounded(g, rc, SF(5), C(70, 59, 130, 246));
-    else if (hover && enabled) DrawRounded(g, rc, SF(5), C(255, 44, 50, 64));
-    Color fg = enabled ? (active ? text : textDim) : C(255, 70, 78, 94);
+    if (active) DrawRounded(g, rc, SF(5), rowSelected);
+    else if (hover && enabled) DrawRounded(g, rc, SF(5), controlHover);
+    Color fg = enabled ? (active ? text : textDim) : WithAlpha(textFaint, 140);
     if (hover && enabled) fg = text;
     if (label.empty()) {
         DrawTextStr(g, glyph, fontIcon, fg, rc, StringAlignmentCenter);
@@ -857,15 +1080,26 @@ inline void DrawToolButton(Graphics& g, const RectF& rc, const wchar_t* glyph, c
 }
 
 inline void DrawButton(Graphics& g, const RectF& rc, const std::wstring& label, bool hover,
-                       bool primary = false, bool danger_ = false, bool disabled = false) {
-    Color fill = hover ? C(255, 44, 50, 64) : C(255, 32, 37, 48);
-    Color border = C(45, 255, 255, 255);
+                       bool primary = false, bool danger_ = false, bool disabled = false, bool focused = false) {
+    Color fill = hover ? controlHover : controlBg;
+    Color border = controlBorder;
     Color fg = text;
-    if (primary) { fill = hover ? C(255, 76, 141, 255) : accentSolid; border = C(0, 0, 0, 0); fg = RGBc(255, 255, 255); }
-    if (danger_) { fill = hover ? C(255, 86, 34, 40) : C(255, 48, 28, 35); border = C(110, 248, 113, 113); fg = C(255, 252, 165, 165); }
-    if (disabled) { fill = C(255, 28, 31, 39); border = C(25, 255, 255, 255); fg = C(255, 84, 94, 112); }
+    if (primary) { fill = hover ? accentHover : accentSolid; border = Color(0, 0, 0, 0); fg = onAccent; }
+    if (danger_) {
+        fill = hover ? Mix(controlBg, danger, 0.28f) : Mix(controlBg, danger, 0.14f);
+        border = WithAlpha(danger, 130);
+        fg = danger;
+    }
+    if (disabled) { fill = controlBg; border = separator; fg = WithAlpha(textFaint, 150); }
     DrawRounded(g, rc, SF(6), fill, border);
+    if (focused && !disabled)
+        DrawRounded(g, RectF(rc.X - 2, rc.Y - 2, rc.Width + 4, rc.Height + 4), SF(8), Color(0, 0, 0, 0), focusRing, 1.5f);
     DrawTextStr(g, label, fontBody, fg, rc, StringAlignmentCenter);
+}
+
+// Caja de texto (el texto lo pinta un EDIT nativo encima).
+inline void DrawField(Graphics& g, const RectF& rc, bool focused = false, float radius = 6) {
+    DrawRounded(g, rc, SF(radius), controlBg, focused ? accent : controlBorder, focused ? 1.3f : 1.0f);
 }
 
 } // namespace style
@@ -912,6 +1146,12 @@ public:
         InvalidateRect(hwnd, &rc, FALSE);
     }
 
+    // Tipo de marco: se vuelve a aplicar cuando cambia el tema.
+    void SetFrame(FrameKind k) {
+        frameKind = k;
+        ApplyFrame(hwnd, k);
+    }
+
     void ReleaseBuffers() {
         delete gbmp;
         gbmp = nullptr;
@@ -927,6 +1167,25 @@ protected:
     // Marco propio sobre WS_OVERLAPPEDWINDOW: todo es área de cliente, pero se
     // conservan maximizar real, Aero Snap, Win+flechas y la animación de minimizar.
     bool customFrame = false;
+    FrameKind frameKind = FrameNone;
+
+    virtual void OnThemeChanged() {}
+
+    static BOOL CALLBACK ThemeChildProc(HWND child, LPARAM) {
+        wchar_t cls[32] = {};
+        GetClassNameW(child, cls, 32);
+        if (_wcsicmp(cls, L"Edit") == 0) SetWindowTheme(child, style::dark ? L"DarkMode_CFD" : L"CFD", nullptr);
+        return TRUE;
+    }
+
+    void HandleThemeChange() {
+        ReloadTheme();
+        ApplyFrame(hwnd, frameKind);
+        EnumChildWindows(hwnd, ThemeChildProc, 0);
+        OnThemeChanged();
+        ReleaseBuffers(); // repintado completo
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
+    }
 
     // Bordes de redimensión + barra de título (excepto los rectángulos indicados).
     LRESULT FrameHitTest(int x, int y, int captionH, std::initializer_list<RectF> exclude) {
@@ -1053,6 +1312,10 @@ protected:
     }
 
     LRESULT Handle(UINT msg, WPARAM wp, LPARAM lp) {
+        if (msg == ThemeMessage()) {
+            HandleThemeChange();
+            return 0;
+        }
         switch (msg) {
         case WM_ERASEBKGND:
             return 1;
@@ -1144,6 +1407,465 @@ protected:
         return OnMessage(msg, wp, lp);
     }
 };
+
+// ------------------------------------------------------------ menús con el tema propio
+// Sustituto de TrackPopupMenu: lee un HMENU normal (texto, atajos tras '\t',
+// marcas, deshabilitados, submenús) y lo dibuja con los colores del tema.
+struct MenuEntry {
+    UINT id = 0;
+    std::wstring text, shortcut;
+    bool sep = false, checked = false, grayed = false, isDefault = false, radio = false;
+    HMENU sub = nullptr;
+};
+
+inline std::vector<MenuEntry> ReadMenuEntries(HMENU m) {
+    std::vector<MenuEntry> out;
+    int n = GetMenuItemCount(m);
+    for (int i = 0; i < n; ++i) {
+        wchar_t buf[512] = {};
+        MENUITEMINFOW mii = { sizeof(mii) };
+        mii.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_STRING;
+        mii.dwTypeData = buf;
+        mii.cch = 511;
+        if (!GetMenuItemInfoW(m, i, TRUE, &mii)) continue;
+        MenuEntry e;
+        e.sep = (mii.fType & MFT_SEPARATOR) != 0;
+        e.radio = (mii.fType & MFT_RADIOCHECK) != 0;
+        e.id = mii.wID;
+        e.sub = mii.hSubMenu;
+        e.checked = (mii.fState & MFS_CHECKED) != 0;
+        e.grayed = (mii.fState & (MFS_GRAYED | MFS_DISABLED)) != 0;
+        e.isDefault = (mii.fState & MFS_DEFAULT) != 0;
+        std::wstring t = buf;
+        size_t tab = t.find(L'\t');
+        if (tab != std::wstring::npos) {
+            e.shortcut = t.substr(tab + 1);
+            t.resize(tab);
+        }
+        for (size_t k = 0; k < t.size(); ++k) { // quitar '&' de los mnemónicos
+            if (t[k] == L'&') {
+                if (k + 1 < t.size() && t[k + 1] == L'&') { e.text += L'&'; ++k; }
+                continue;
+            }
+            e.text += t[k];
+        }
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+class MenuPopup : public WindowBase {
+public:
+    std::vector<MenuEntry> items;
+    std::vector<RectF> rects;
+    int hover = -1;
+    int width = 0, height = 0;
+
+    bool Open(HMENU m, int x, int y, UINT flags, const RECT* parentItem) {
+        items = ReadMenuEntries(m);
+        if (items.empty()) return false;
+        Measure();
+        POINT anchor = { x, y };
+        if (parentItem) anchor = { parentItem->right, parentItem->top };
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfoW(MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST), &mi);
+        RECT wa = mi.rcWork;
+        int px = x, py = y;
+        if (parentItem) {
+            px = parentItem->right - S(2);
+            py = parentItem->top - S(4);
+            if (px + width > wa.right) px = parentItem->left - width + S(2);
+            if (py + height > wa.bottom) py = wa.bottom - height;
+        } else {
+            if (flags & TPM_RIGHTALIGN) px -= width;
+            else if (flags & TPM_CENTERALIGN) px -= width / 2;
+            if (flags & TPM_BOTTOMALIGN) py -= height;
+            else if (flags & TPM_VCENTERALIGN) py -= height / 2;
+            if (px + width > wa.right) px = wa.right - width;
+            if (py + height > wa.bottom) py = std::max((int)wa.top, y - height);
+        }
+        px = std::max((int)wa.left, px);
+        py = std::max((int)wa.top, py);
+        if (!Create(L"OShellCppMenu", WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, WS_POPUP, px, py, width,
+                    height, L"", CS_DROPSHADOW))
+            return false;
+        SetFrame(FrameMenu);
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        UpdateWindow(hwnd);
+        return true;
+    }
+
+    bool Selectable(int i) const { return i >= 0 && i < (int)items.size() && !items[i].sep && !items[i].grayed; }
+
+    // Índice del elemento bajo un punto de pantalla; -1 = dentro pero sin elemento, -2 = fuera.
+    int ItemAtScreen(POINT pt) const {
+        RECT wr;
+        GetWindowRect(hwnd, &wr);
+        if (!PtInRect(&wr, pt)) return -2;
+        int x = pt.x - wr.left, y = pt.y - wr.top;
+        for (int i = 0; i < (int)items.size(); ++i)
+            if (!items[i].sep && InRect(rects[i], x, y)) return i;
+        return -1;
+    }
+
+    RECT ItemScreenRect(int i) const {
+        RECT wr;
+        GetWindowRect(hwnd, &wr);
+        const RectF& r = rects[i];
+        return RECT{ wr.left, wr.top + (LONG)r.Y, wr.right, wr.top + (LONG)(r.Y + r.Height) };
+    }
+
+    void SetHover(int i) {
+        if (i == hover) return;
+        if (hover >= 0) InvalidateRectF(rects[hover]);
+        hover = i;
+        if (i >= 0) InvalidateRectF(rects[i]);
+    }
+
+protected:
+    void Measure() {
+        float textW = 0, keyW = 0;
+        HDC dc = GetDC(nullptr);
+        {
+            Graphics g(dc);
+            for (auto& it : items) {
+                if (it.sep) continue;
+                RectF b;
+                g.MeasureString(it.text.c_str(), -1, it.isDefault ? fontBold : fontBody, PointF(0, 0), &b);
+                textW = std::max(textW, b.Width);
+                if (!it.shortcut.empty()) {
+                    g.MeasureString(it.shortcut.c_str(), -1, fontSmall, PointF(0, 0), &b);
+                    keyW = std::max(keyW, b.Width);
+                }
+            }
+        }
+        ReleaseDC(nullptr, dc);
+        width = std::max(S(180), (int)(S(40) + textW + (keyW > 0 ? S(30) + keyW : 0) + S(36)));
+        int y = S(4);
+        rects.clear();
+        for (auto& it : items) {
+            int h = it.sep ? S(9) : S(32);
+            rects.push_back(RectF((float)S(4), (float)y, (float)width - S(8), (float)h));
+            y += h;
+        }
+        height = y + S(4);
+    }
+
+    void OnPaint(Graphics& g, int w, int h) override {
+        g.Clear(style::menuBg);
+        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), SF(6), Color(0, 0, 0, 0), style::menuBorder);
+        for (size_t i = 0; i < items.size(); ++i) {
+            const MenuEntry& it = items[i];
+            const RectF& r = rects[i];
+            if (it.sep) {
+                HLine(g, r.X + S(8), r.X + r.Width - S(8), r.Y + r.Height / 2, style::separator);
+                continue;
+            }
+            if ((int)i == hover && !it.grayed) DrawRounded(g, r, SF(4), style::menuHover);
+            Color fg = it.grayed ? WithAlpha(style::textFaint, 150) : style::text;
+            if (it.checked) {
+                if (it.radio) FillCircle(g, r.X + S(17), r.Y + r.Height / 2, SF(3.5f), it.grayed ? fg : style::accent);
+                else DrawTextStr(g, L"", fontIcon, it.grayed ? fg : style::accent,
+                                 RectF(r.X + S(6), r.Y, (float)S(22), r.Height), StringAlignmentCenter);
+            }
+            DrawTextStr(g, it.text, it.isDefault ? fontBold : fontBody, fg,
+                        RectF(r.X + S(34), r.Y, r.Width - S(34) - S(28), r.Height));
+            if (!it.shortcut.empty())
+                DrawTextStr(g, it.shortcut, fontSmall, style::textFaint, RectF(r.X, r.Y, r.Width - S(26), r.Height),
+                            StringAlignmentFar);
+            if (it.sub)
+                DrawTextStr(g, L"", fontIcon, fg, RectF(r.X + r.Width - S(24), r.Y, (float)S(20), r.Height),
+                            StringAlignmentCenter);
+        }
+    }
+
+    LRESULT OnMessage(UINT msg, WPARAM wp, LPARAM lp) override {
+        if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+};
+
+// Misma firma que TrackPopupMenu. Con TPM_RETURNCMD devuelve el id elegido (0 = nada).
+inline int ThemedMenu(HMENU menu, UINT flags, int x, int y, int, HWND owner, const RECT* = nullptr) {
+    if (!menu || GetMenuItemCount(menu) <= 0) return 0;
+    std::vector<std::unique_ptr<MenuPopup>> chain; // [0] = raíz, back() = submenú más profundo
+    std::vector<int> openedFrom;                  // índice del elemento del que cuelga cada nivel
+    {
+        auto root = std::make_unique<MenuPopup>();
+        if (!root->Open(menu, x, y, flags, nullptr)) return 0;
+        chain.push_back(std::move(root));
+        openedFrom.push_back(-1);
+    }
+    HWND cap = chain[0]->Hwnd();
+    SetCapture(cap);
+    SetTimer(cap, 77, 150, nullptr);
+    HWND fgStart = GetForegroundWindow();
+
+    auto closeFrom = [&](size_t level) {
+        while (chain.size() > level) {
+            chain.pop_back();
+            openedFrom.pop_back();
+        }
+    };
+    auto openSub = [&](size_t level, int idx) -> bool {
+        MenuPopup* p = chain[level].get();
+        if (!p->Selectable(idx) || !p->items[idx].sub) return false;
+        if (chain.size() > level + 1 && openedFrom[level + 1] == idx) return true;
+        closeFrom(level + 1);
+        RECT r = p->ItemScreenRect(idx);
+        auto sub = std::make_unique<MenuPopup>();
+        if (!sub->Open(p->items[idx].sub, 0, 0, 0, &r)) return false;
+        chain.push_back(std::move(sub));
+        openedFrom.push_back(idx);
+        return true;
+    };
+    auto hoverFirst = [](MenuPopup* p) {
+        for (int i = 0; i < (int)p->items.size(); ++i)
+            if (p->Selectable(i)) { p->SetHover(i); break; }
+    };
+
+    int result = 0;
+    bool done = false;
+    MSG msg;
+    while (!done) {
+        if (!GetMessageW(&msg, nullptr, 0, 0)) { PostQuitMessage((int)msg.wParam); break; }
+        if (GetCapture() != cap) break; // otra ventana tomó el ratón (Alt+Tab, etc.)
+        if (msg.message == WM_TIMER && msg.hwnd == cap && msg.wParam == 77) {
+            if (GetForegroundWindow() != fgStart) break;
+            continue;
+        }
+        if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) {
+            int level = -1, idx = -2;
+            for (int k = (int)chain.size() - 1; k >= 0; --k) {
+                int i = chain[k]->ItemAtScreen(msg.pt);
+                if (i != -2) { level = k; idx = i; break; }
+            }
+            bool inside = level >= 0;
+            switch (msg.message) {
+            case WM_MOUSEMOVE:
+                if (inside) {
+                    MenuPopup* p = chain[level].get();
+                    p->SetHover(p->Selectable(idx) ? idx : -1);
+                    if (p->Selectable(idx) && p->items[idx].sub) openSub(level, idx);
+                    else if (idx >= 0 && (int)chain.size() > level + 1) closeFrom(level + 1);
+                }
+                break;
+            case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
+                if (!inside) done = true;
+                break;
+            case WM_LBUTTONUP: case WM_RBUTTONUP:
+                if (inside && chain[level]->Selectable(idx)) {
+                    const MenuEntry& it = chain[level]->items[idx];
+                    if (it.sub) openSub(level, idx);
+                    else { result = (int)it.id; done = true; }
+                }
+                break;
+            }
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) {
+            MenuPopup* p = chain.back().get();
+            int n = (int)p->items.size();
+            auto move = [&](int dir) {
+                int i = p->hover < 0 ? (dir > 0 ? -1 : n) : p->hover;
+                for (int k = 0; k < n; ++k) {
+                    i = (i + dir + n) % n;
+                    if (p->Selectable(i)) { p->SetHover(i); break; }
+                }
+            };
+            switch (msg.wParam) {
+            case VK_ESCAPE: if (chain.size() > 1) closeFrom(chain.size() - 1); else done = true; break;
+            case VK_MENU: case VK_F10: done = true; break;
+            case VK_UP: move(-1); break;
+            case VK_DOWN: move(1); break;
+            case VK_LEFT: if (chain.size() > 1) closeFrom(chain.size() - 1); break;
+            case VK_RIGHT: case VK_RETURN: case VK_SPACE:
+                if (p->Selectable(p->hover)) {
+                    const MenuEntry& it = p->items[p->hover];
+                    if (it.sub) { if (openSub(chain.size() - 1, p->hover)) hoverFirst(chain.back().get()); }
+                    else if (msg.wParam != VK_RIGHT) { result = (int)it.id; done = true; }
+                }
+                break;
+            }
+            continue;
+        }
+        if (msg.message == WM_CHAR || msg.message == WM_SYSCHAR || msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP)
+            continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    KillTimer(cap, 77);
+    if (GetCapture() == cap) ReleaseCapture();
+    chain.clear();
+    if (result && !(flags & TPM_RETURNCMD) && owner) PostMessageW(owner, WM_COMMAND, result, 0);
+    return (flags & TPM_RETURNCMD) ? result : (result ? TRUE : FALSE);
+}
+
+// ------------------------------------------------------------ cuadros de mensaje con el tema propio
+class MessageDialog : public WindowBase {
+public:
+    int Run(HWND owner, const std::wstring& msgText, const std::wstring& msgTitle, UINT flags) {
+        text = msgText;
+        title = msgTitle;
+        switch (flags & MB_TYPEMASK) {
+        case MB_OKCANCEL: btns = { { IDOK, L"Aceptar" }, { IDCANCEL, L"Cancelar" } }; cancelId = IDCANCEL; break;
+        case MB_YESNO: btns = { { IDYES, L"Sí" }, { IDNO, L"No" } }; cancelId = IDNO; break;
+        case MB_YESNOCANCEL: btns = { { IDYES, L"Sí" }, { IDNO, L"No" }, { IDCANCEL, L"Cancelar" } }; cancelId = IDCANCEL; break;
+        case MB_RETRYCANCEL: btns = { { IDRETRY, L"Reintentar" }, { IDCANCEL, L"Cancelar" } }; cancelId = IDCANCEL; break;
+        default: btns = { { IDOK, L"Aceptar" } }; cancelId = IDOK; break;
+        }
+        focus = std::min((int)((flags & MB_DEFMASK) >> 8), (int)btns.size() - 1);
+        switch (flags & MB_ICONMASK) {
+        case MB_ICONERROR: glyph = L""; beep = MB_ICONERROR; break;
+        case MB_ICONQUESTION: glyph = L""; beep = MB_ICONQUESTION; break;
+        case MB_ICONWARNING: glyph = L""; beep = MB_ICONWARNING; break;
+        case MB_ICONINFORMATION: glyph = L""; beep = MB_ICONINFORMATION; break;
+        default: glyph = nullptr; break;
+        }
+        iconKind = flags & MB_ICONMASK;
+
+        int w = S(470);
+        float textW = (float)(w - S(48) - (glyph ? S(48) : 0));
+        float textH = 0;
+        HDC dc = GetDC(nullptr);
+        {
+            Graphics g(dc);
+            RectF b;
+            g.MeasureString(text.c_str(), -1, fontBody, RectF(0, 0, textW, 4000),
+                            CachedFormat(StringAlignmentNear, StringAlignmentNear, true), &b);
+            textH = b.Height;
+        }
+        ReleaseDC(nullptr, dc);
+        int h = S(62) + std::max((int)textH, glyph ? S(10) : 0) + S(28) + S(62);
+
+        RECT ref = {};
+        if (owner && IsWindowVisible(owner) && !IsIconic(owner)) GetWindowRect(owner, &ref);
+        else SystemParametersInfoW(SPI_GETWORKAREA, 0, &ref, 0);
+        int x = ref.left + ((ref.right - ref.left) - w) / 2;
+        int y = ref.top + ((ref.bottom - ref.top) - h) / 2;
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfoW(MonitorFromRect(&ref, MONITOR_DEFAULTTONEAREST), &mi);
+        x = std::max((int)mi.rcWork.left, std::min(x, (int)mi.rcWork.right - w));
+        y = std::max((int)mi.rcWork.top, std::min(y, (int)mi.rcWork.bottom - h));
+
+        DWORD ex = owner ? 0 : (WS_EX_TOPMOST | WS_EX_APPWINDOW);
+        if (!Create(L"OShellCppMessage", ex, WS_POPUP, x, y, w, h, title.c_str()))
+            return MessageBoxW(owner, text.c_str(), title.c_str(), flags);
+        if (owner) SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)owner);
+        SetFrame(FrameOpaque);
+        bool ownerWasEnabled = owner && IsWindowEnabled(owner);
+        if (owner) EnableWindow(owner, FALSE);
+        ShowWindow(hwnd, SW_SHOW);
+        ForceForeground(hwnd);
+        SetFocus(hwnd);
+        if (glyph) MessageBeep(beep);
+
+        MSG msg;
+        while (!done && IsWindow(hwnd)) {
+            if (!GetMessageW(&msg, nullptr, 0, 0)) { PostQuitMessage((int)msg.wParam); break; }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (owner) {
+            if (ownerWasEnabled) EnableWindow(owner, TRUE);
+            SetForegroundWindow(owner);
+        }
+        Close();
+        return result ? result : cancelId;
+    }
+
+protected:
+    struct Btn {
+        int id;
+        std::wstring label;
+        RectF rc;
+    };
+    std::wstring text, title;
+    std::vector<Btn> btns;
+    const wchar_t* glyph = nullptr;
+    UINT beep = 0, iconKind = 0;
+    int cancelId = IDOK, focus = 0, hoverBtn = -1, result = 0;
+    bool done = false;
+
+    void Finish(int id) {
+        result = id;
+        done = true;
+    }
+
+    void OnPaint(Graphics& g, int w, int h) override {
+        g.Clear(style::dialogBg);
+        float barH = (float)S(62);
+        FillRect(g, RectF(0, h - barH, (float)w, barH), style::titleBg);
+        HLine(g, 0, (float)w, h - barH, style::separator);
+        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), 0, Color(0, 0, 0, 0), style::cardBorder);
+
+        float tx = (float)S(24);
+        if (glyph) {
+            Color c = iconKind == MB_ICONERROR ? style::danger : (iconKind == MB_ICONWARNING ? style::warning : style::accent);
+            RectF ic((float)S(24), (float)S(22), (float)S(34), (float)S(34));
+            DrawRounded(g, ic, ic.Width / 2, WithAlpha(c, style::dark ? 40 : 30));
+            DrawTextStr(g, glyph, fontIcon, c, ic, StringAlignmentCenter);
+            tx += S(48);
+        }
+        DrawTextStr(g, title, fontBold, style::text, RectF(tx, (float)S(20), w - tx - S(24), (float)S(26)));
+        DrawTextV(g, text, fontBody, style::textDim, RectF(tx, (float)S(52), w - tx - S(24), h - barH - S(60)),
+                  StringAlignmentNear, true);
+
+        float bw = (float)S(108), bh = (float)S(34);
+        float bx = w - S(20) - bw * btns.size() - S(10) * (btns.size() - 1);
+        for (size_t i = 0; i < btns.size(); ++i) {
+            btns[i].rc = RectF(bx + i * (bw + S(10)), h - barH + (barH - bh) / 2, bw, bh);
+            style::DrawButton(g, btns[i].rc, btns[i].label, (int)i == hoverBtn, (int)i == focus, false, false,
+                              (int)i == focus);
+        }
+    }
+
+    void OnMouseMove(int x, int y) override {
+        int hv = -1;
+        for (size_t i = 0; i < btns.size(); ++i)
+            if (InRect(btns[i].rc, x, y)) hv = (int)i;
+        if (hv != hoverBtn) { hoverBtn = hv; Invalidate(); }
+    }
+
+    void OnMouseDown(int x, int y) override {
+        for (auto& b : btns)
+            if (InRect(b.rc, x, y)) { Finish(b.id); return; }
+    }
+
+    void OnKeyDown(int vk) override {
+        int n = (int)btns.size();
+        switch (vk) {
+        case VK_ESCAPE: Finish(cancelId); break;
+        case VK_RETURN: case VK_SPACE: Finish(btns[focus].id); break;
+        case VK_TAB: focus = (focus + (GetKeyState(VK_SHIFT) < 0 ? n - 1 : 1)) % n; Invalidate(); break;
+        case VK_LEFT: focus = (focus + n - 1) % n; Invalidate(); break;
+        case VK_RIGHT: focus = (focus + 1) % n; Invalidate(); break;
+        case 'S': case 'Y': for (auto& b : btns) if (b.id == IDYES) Finish(IDYES); break;
+        case 'N': for (auto& b : btns) if (b.id == IDNO) Finish(IDNO); break;
+        case 'C':
+            if (GetKeyState(VK_CONTROL) < 0) CopyTextToClipboard(hwnd, title + L"\r\n\r\n" + text);
+            break;
+        }
+    }
+
+    LRESULT OnHitTest(int x, int y) override {
+        for (auto& b : btns)
+            if (InRect(b.rc, x, y)) return HTCLIENT;
+        return y < S(50) ? HTCAPTION : 0;
+    }
+
+    bool CanClose() override {
+        Finish(cancelId);
+        return false;
+    }
+};
+
+// Misma firma y valores de retorno que MessageBox, con el tema propio.
+inline int MsgBox(HWND owner, const std::wstring& text, const std::wstring& title = L"OptimizedShell", UINT flags = MB_OK) {
+    if (!fontBody) return MessageBoxW(owner, text.c_str(), title.c_str(), flags); // UI sin inicializar
+    MessageDialog d;
+    return d.Run(owner, text, title, flags);
+}
 
 // Bucle de mensajes estándar.
 inline int RunMessageLoop() {

@@ -36,6 +36,7 @@ using namespace ui;
 int RunLogonUIMode(bool demo, bool lockMode);
 int RunTaskManagerMode();
 int RunExplorerMode();
+int RunSettingsMode();
 
 namespace {
 
@@ -162,10 +163,10 @@ void DrawBattery(Graphics& g, float x, float y, float size, const Color& c, int 
     SolidBrush b(c);
     g.FillRectangle(&b, x, y + size * 0.10f, size * 0.82f, size * 0.80f);
     g.FillRectangle(&b, x + size * 0.82f, y + size * 0.32f, size * 0.10f, size * 0.36f);
-    SolidBrush bg(C(255, 24, 26, 34));
+    SolidBrush bg(WithAlpha(style::taskbarBg, 255));
     g.FillRectangle(&bg, x + size * 0.06f, y + size * 0.16f, size * 0.70f, size * 0.68f);
     percent = std::max(0, std::min(100, percent));
-    Color lvl = charging ? style::accent : (percent < 20 ? C(255, 239, 68, 68) : C(255, 74, 222, 128));
+    Color lvl = charging ? style::accent : (percent < 20 ? style::danger : style::success);
     SolidBrush lb(lvl);
     g.FillRectangle(&lb, x + size * 0.06f, y + size * 0.16f, size * 0.70f * percent / 100.0f, size * 0.68f);
 }
@@ -309,7 +310,7 @@ protected:
             bool sel = ((int)i == selected);
             if (sel)
                 DrawRounded(g, RectF(cell.X + 4, cell.Y + 2, cell.Width - 8, cell.Height - 4), SF(6),
-                            C(130, 59, 130, 246), C(180, 147, 197, 253));
+                            WithAlpha(style::accentSolid, 130), WithAlpha(style::accent, 200));
             Bitmap* bmp = SysIconBitmap(it.iconIndex, icon);
             float ix = cell.X + (cell.Width - icon) / 2;
             if (bmp) g.DrawImage(bmp, ix, cell.Y + 6, (float)icon, (float)icon);
@@ -373,7 +374,7 @@ protected:
         AppendMenuW(m, MF_STRING, 3, L"Eliminar");
         AppendMenuW(m, MF_STRING, 4, L"Propiedades");
         SetForegroundWindow(hwnd);
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         switch (cmd) {
         case 1: Open(idx); break;
@@ -392,8 +393,9 @@ protected:
         AppendMenuW(m, MF_STRING, 4, L"Configuración de pantalla");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, 5, L"Administrador de tareas");
+        AppendMenuW(m, MF_STRING, 6, L"Personalizar OptimizedShell");
         SetForegroundWindow(hwnd);
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         wchar_t dir[MAX_PATH] = {};
         switch (cmd) {
@@ -404,6 +406,7 @@ protected:
         case 3: Launch(L"ms-settings:personalization-background"); break;
         case 4: Launch(L"ms-settings:display"); break;
         case 5: LaunchOwn(L"--taskmgr"); break;
+        case 6: LaunchOwn(L"--settings"); break;
         }
     }
 
@@ -469,7 +472,7 @@ protected:
         if (!Create(L"OShellCppRun", WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WS_POPUP | WS_CLIPCHILDREN,
                     x, y, w, h, L"Ejecutar"))
             return false;
-        EnableDarkFrame(hwnd);
+        SetFrame(FrameOpaque);
         field = RectF((float)S(20), (float)S(74), (float)w - S(40), (float)S(36));
         ok = RectF((float)w - S(20) - S(100), (float)h - S(20) - S(32), (float)S(100), (float)S(32));
         cancel = RectF(ok.X - S(10) - S(100), ok.Y, (float)S(100), (float)S(32));
@@ -486,16 +489,16 @@ protected:
         std::wstring cmd = Trim(GetWindowString(edit));
         if (cmd.empty()) return;
         if (RunCommandLine(cmd, hwnd)) Close();
-        else MessageBoxW(hwnd, (L"No se encuentra \"" + cmd + L"\".").c_str(), L"Ejecutar", MB_ICONWARNING);
+        else ui::MsgBox(hwnd, (L"No se encuentra \"" + cmd + L"\".").c_str(), L"Ejecutar", MB_ICONWARNING);
     }
 
     void OnPaint(Graphics& g, int w, int h) override {
-        g.Clear(RGBc(20, 23, 31));
-        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), 0, Color(0, 0, 0, 0), C(60, 255, 255, 255));
+        g.Clear(style::dialogBg);
+        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), 0, Color(0, 0, 0, 0), style::cardBorder);
         DrawTextStr(g, L"Ejecutar", fontTitle, style::text, RectF((float)S(20), (float)S(16), (float)w - S(40), (float)S(30)));
         DrawTextStr(g, L"Escribe el nombre de un programa, carpeta, documento o recurso de Internet.",
                     fontSmall, style::textDim, RectF((float)S(20), (float)S(46), (float)w - S(40), (float)S(20)));
-        DrawRounded(g, field, SF(6), C(255, 35, 40, 52), style::accent, 1.2f);
+        style::DrawField(g, field, true);
         style::DrawButton(g, cancel, L"Cancelar", hover == 2);
         style::DrawButton(g, ok, L"Aceptar", hover == 1, true);
     }
@@ -577,7 +580,7 @@ public:
         if (!Create(L"OShellCppStartMenu", WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WS_POPUP | WS_CLIPCHILDREN,
                     0, 0, w, h, L"Inicio"))
             return false;
-        EnableDarkFrame(hwnd);
+        SetFrame(FrameOpaque);
         wchar_t user[256] = {};
         DWORD un = 256;
         if (!GetUserNameExW_(user, &un)) GetUserNameW(user, &un);
@@ -642,7 +645,7 @@ protected:
     std::map<std::wstring, bool> requested;
 
     RectF searchRc, listRc, btns[5];
-    static constexpr int kBtnCount = 5;
+    static constexpr int kBtnCount = 6;
 
     static BOOL GetUserNameExW_(wchar_t* buf, DWORD* len) {
         // Nombre para mostrar si existe (cuenta Microsoft / dominio); si no, el de inicio de sesión.
@@ -755,19 +758,19 @@ protected:
     }
 
     void OnPaint(Graphics& g, int w, int h) override {
-        g.Clear(RGBc(20, 22, 30));
-        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), 0, Color(0, 0, 0, 0), C(70, 255, 255, 255));
+        g.Clear(style::dialogBg);
+        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), 0, Color(0, 0, 0, 0), style::cardBorder);
 
         // Cabecera: avatar con inicial + nombre
         RectF av((float)S(16), (float)S(14), (float)S(36), (float)S(36));
         DrawRounded(g, av, av.Width / 2, style::accentSolid);
-        DrawTextStr(g, userName.substr(0, 1), fontBold, RGBc(255, 255, 255), av, StringAlignmentCenter);
+        DrawTextStr(g, userName.substr(0, 1), fontBold, style::onAccent, av, StringAlignmentCenter);
         DrawTextStr(g, userName, fontBold, style::text, RectF((float)S(62), (float)S(14), (float)w - S(80), (float)S(20)));
         DrawTextStr(g, g_shellMode ? L"OptimizedShell · shell del sistema" : L"OptimizedShell", fontSmall,
                     style::textFaint, RectF((float)S(62), (float)S(32), (float)w - S(80), (float)S(18)));
 
         // Buscador (el texto lo pinta el EDIT nativo)
-        DrawRounded(g, searchRc, SF(18), C(255, 35, 40, 52), C(60, 255, 255, 255));
+        DrawRounded(g, searchRc, SF(18), style::controlBg, style::controlBorder);
         DrawTextStr(g, L"\uE721", fontIcon, style::textDim,
                     RectF(searchRc.X + S(10), searchRc.Y, (float)S(20), searchRc.Height), StringAlignmentCenter);
 
@@ -784,7 +787,7 @@ protected:
             if (vi >= (int)view.size()) break;
             const AppEntry& a = apps[view[vi]];
             RectF rr(listRc.X, listRc.Y + row * RowH(), listRc.Width - S(8), (float)RowH() - S(2));
-            if (vi == selected) DrawRounded(g, rr, SF(6), C(90, 59, 130, 246));
+            if (vi == selected) DrawRounded(g, rr, SF(6), style::rowSelected);
             else if (vi == hoverRow) DrawRounded(g, rr, SF(6), style::rowHover);
             int isz = S(24);
             auto it = icons.find(a.parse);
@@ -792,7 +795,7 @@ protected:
                 g.DrawImage(it->second, rr.X + S(10), rr.Y + (rr.Height - isz) / 2, (float)isz, (float)isz);
             } else {
                 DrawRounded(g, RectF(rr.X + S(10), rr.Y + (rr.Height - isz) / 2, (float)isz, (float)isz), SF(5),
-                            C(255, 44, 50, 64));
+                            style::controlHover);
                 if (it == icons.end()) RequestIcon(a.parse);
             }
             DrawTextStr(g, a.name, fontBody, style::text,
@@ -802,8 +805,8 @@ protected:
                       (int)view.size(), vis, scroll);
 
         // Barra inferior
-        HLine(g, 0, (float)w, (float)h - S(62), C(30, 255, 255, 255));
-        const wchar_t* glyphs[kBtnCount] = { L"\uEC50", L"\uE713", L"\uE9D9", L"\uE7C4", L"\uE7E8" };
+        HLine(g, 0, (float)w, (float)h - S(62), style::separator);
+        const wchar_t* glyphs[kBtnCount] = { L"\uEC50", L"\uE713", L"\uE9D9", L"\uE7C4", L"\uE771", L"\uE7E8" };
         for (int i = 0; i < kBtnCount; ++i)
             style::DrawToolButton(g, btns[i], glyphs[i], L"", hoverBtn == i + 1);
     }
@@ -832,7 +835,7 @@ protected:
         else AppendMenuW(m, MF_STRING, 7, L"Salir de OptimizedShell");
         POINT pt = { (LONG)btns[kBtnCount - 1].X, (LONG)btns[kBtnCount - 1].Y };
         ClientToScreen(hwnd, &pt);
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, pt.x + S(44), pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN | TPM_RIGHTALIGN, pt.x + S(44), pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         if (!cmd) return;
         Hide();
@@ -856,7 +859,8 @@ protected:
         case 2: Hide(); Launch(L"ms-settings:"); break;
         case 3: Hide(); LaunchOwn(L"--taskmgr"); break;
         case 4: Hide(); RunDialog::Show(); break;
-        case 5: PowerMenu(); break;
+        case 5: Hide(); LaunchOwn(L"--settings"); break;
+        case 6: PowerMenu(); break;
         }
         SetFocus(search);
     }
@@ -868,7 +872,7 @@ protected:
         if (b != hoverBtn) {
             hoverBtn = b;
             for (auto& br : btns) InvalidateRectF(br);
-            static const wchar_t* tips[] = { L"", L"Archivos", L"Configuración", L"Administrador de tareas", L"Ejecutar", L"Inicio/apagado" };
+            static const wchar_t* tips[] = { L"", L"Archivos", L"Configuración", L"Administrador de tareas", L"Ejecutar", L"Personalización", L"Inicio/apagado" };
             tip.Set(b ? btns[b - 1] : RectF(), tips[b]);
         }
         if (r >= 0 || b) SetCursor(LoadCursorW(nullptr, IDC_HAND));
@@ -937,7 +941,7 @@ public:
         height = h;
         refreshInterval = refreshMs;
         if (!Create(cls, WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WS_POPUP, 0, 0, w, h, L"")) return false;
-        EnableBlur(hwnd, 0xF214161C);
+        SetFrame(FrameFlyout);
         return true;
     }
 
@@ -1110,7 +1114,7 @@ protected:
         LayoutAll(w, h);
         PaintFrame(g, w, h, L"Volumen", L"\uE767");
 
-        DrawSpeaker(g, speaker.X, speaker.Y, speaker.Width, muted ? C(255, 112, 124, 146) : style::text);
+        DrawSpeaker(g, speaker.X, speaker.Y, speaker.Width, muted ? style::textFaint : style::text);
         if (muted) {
             Pen p(style::danger, SF(2.2f));
             p.SetStartCap(LineCapRound);
@@ -1381,7 +1385,7 @@ protected:
         for (int i = 0; i < 4; ++i) {
             float bh = SF(4.0f + i * 3.0f);
             bool on = quality >= (i + 1) * 22;
-            SolidBrush bb(on ? c : C(45, 255, 255, 255));
+            SolidBrush bb(on ? c : style::track);
             g.FillRectangle(&bb, x + i * SF(5), y + SF(14) - bh, SF(3.2f), bh);
         }
     }
@@ -1401,7 +1405,7 @@ protected:
         std::wstring state = haveInterface ? (radioOn ? L"Activado" : L"Desactivado") : L"Sin adaptador";
         DrawTextStr(g, state, fontSmall, style::textFaint, RectF((float)S(20), (float)S(72), (float)S(160), (float)S(18)));
         style::DrawSwitch(g, switchRect, radioOn && haveInterface, hoverRadio != 0);
-        HLine(g, (float)S(16), (float)w - S(16), (float)S(102), C(30, 255, 255, 255));
+        HLine(g, (float)S(16), (float)w - S(16), (float)S(102), style::separator);
 
         RectF msgRc((float)S(16), (float)S(130), (float)w - S(32), (float)S(28));
         if (!haveInterface) {
@@ -1422,7 +1426,7 @@ protected:
                 const WifiNetwork& n = networks[idx];
                 RectF rr(rowArea.X, rowArea.Y + row * S(54), rowArea.Width, (float)S(48));
                 if (idx == hoverRow || n.connected)
-                    DrawRounded(g, rr, SF(6), n.connected ? C(60, 52, 199, 123) : style::rowHover);
+                    DrawRounded(g, rr, SF(6), n.connected ? WithAlpha(style::success, 45) : style::rowHover);
                 DrawSignal(g, rr.X + S(10), rr.Y + S(10), n.quality, n.connected ? style::success : style::textDim);
                 float textX = rr.X + S(42);
                 DrawTextStr(g, n.ssid, fontBody, style::text, RectF(textX, rr.Y + S(5), rr.Width - S(160), (float)S(22)));
@@ -1531,9 +1535,9 @@ protected:
     void DrawBigBattery(Graphics& g, const RectF& rc, int percent, bool charging, bool missing) {
         Color base = missing ? style::textFaint
                              : (percent <= 15 ? style::danger : (percent <= 35 ? style::warning : style::success));
-        DrawRounded(g, rc, SF(6), C(70, 255, 255, 255), C(120, 180, 190, 205), 1.4f);
+        DrawRounded(g, rc, SF(6), style::track, WithAlpha(style::textDim, 160), 1.4f);
         RectF cap(rc.X + rc.Width, rc.Y + rc.Height * 0.30f, rc.Width * 0.06f, rc.Height * 0.40f);
-        DrawRounded(g, cap, SF(2), C(120, 180, 190, 205));
+        DrawRounded(g, cap, SF(2), WithAlpha(style::textDim, 160));
         if (!missing) {
             float inset = SF(5);
             RectF fill(rc.X + inset, rc.Y + inset, (rc.Width - inset * 2) * (percent / 100.0f), rc.Height - inset * 2);
@@ -1578,7 +1582,7 @@ protected:
         DrawTextStr(g, buf, fontBig, style::text, RectF((float)S(148), (float)S(54), (float)w - S(172), (float)S(38)));
         DrawTextStr(g, StateText(), fontSmall, charging ? style::success : style::textDim,
                     RectF((float)S(148), (float)S(90), (float)w - S(172), (float)S(20)));
-        HLine(g, (float)S(16), (float)w - S(16), (float)S(128), C(30, 255, 255, 255));
+        HLine(g, (float)S(16), (float)w - S(16), (float)S(128), style::separator);
 
         struct Row { const wchar_t* label; std::wstring value; };
         Row rows[] = {
@@ -1685,7 +1689,7 @@ public:
                     L"Barra de tareas"))
             return false;
         g_taskbarHwnd = hwnd;
-        EnableBlur(hwnd, 0xE614161C);
+        SetFrame(FrameTaskbar);
 
         shellHookMsg = RegisterWindowMessageW(L"SHELLHOOK");
         RegisterShellHookWindow(hwnd);
@@ -1952,7 +1956,7 @@ protected:
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, 4, L"Cerrar ventana");
         SetForegroundWindow(hwnd);
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         switch (cmd) {
         case 1: ShowWindowAsync(w, SW_RESTORE); ForceForeground(w); break;
@@ -2121,13 +2125,13 @@ protected:
     void OnSize(UINT, int, int) override { Relayout(); }
 
     void OnPaint(Graphics& g, int w, int hh) override {
-        g.Clear(C(150, 16, 18, 24));
-        HLine(g, 0, (float)w, 0, C(50, 255, 255, 255));
+        g.Clear(style::taskbarBg);
+        HLine(g, 0, (float)w, 0, style::separator);
 
         // Inicio: cuatro cuadrados de acento
         if (hoverKind == HStart || startMenu.IsVisible())
             DrawRounded(g, RectF(startRc.X + S(6), (float)S(5), startRc.Width - S(12), (float)hh - S(10)), SF(6),
-                        C(255, 40, 45, 58));
+                        style::taskButtonHover);
         {
             float d = SF(7), gap = SF(4);
             float total = d * 2 + gap;
@@ -2145,8 +2149,8 @@ protected:
             if (t.rc.Width <= 0) continue;
             bool active = t.hwnd == activeHwnd;
             bool hov = hoverKind == HTask && (int)i == hoverIndex;
-            Color bg = t.flash ? C(255, 120, 82, 20)
-                     : (active ? C(255, 44, 48, 62) : (hov ? C(255, 36, 39, 50) : C(255, 28, 31, 40)));
+            Color bg = t.flash ? Mix(style::taskButton, style::warning, 0.45f)
+                     : (active ? style::taskButtonActive : (hov ? style::taskButtonHover : style::taskButton));
             DrawRounded(g, t.rc, SF(6), bg);
             if (active)
                 DrawRounded(g, RectF(t.rc.X + t.rc.Width / 2 - S(10), t.rc.Y + t.rc.Height - S(3), (float)S(20), (float)S(3)),
@@ -2165,7 +2169,7 @@ protected:
         for (size_t i = 0; i < tray.size(); ++i) {
             const TrayIcon& t = tray[i];
             if (t.hidden || t.rc.Width <= 0) continue;
-            if (hoverKind == HTray && (int)i == hoverIndex) DrawRounded(g, t.rc, SF(5), C(255, 40, 45, 58));
+            if (hoverKind == HTray && (int)i == hoverIndex) DrawRounded(g, t.rc, SF(5), style::taskButtonHover);
             int isz = S(16);
             if (t.bmp) g.DrawImage(t.bmp, t.rc.X + (t.rc.Width - isz) / 2, t.rc.Y + (t.rc.Height - isz) / 2,
                                    (float)isz, (float)isz);
@@ -2174,7 +2178,7 @@ protected:
         // Iconos del sistema
         auto sysHover = [&](HoverKind k, const RectF& r) {
             if (hoverKind == k) DrawRounded(g, RectF(r.X + S(1), (float)S(8), r.Width - S(2), (float)hh - S(16)), SF(5),
-                                            C(255, 40, 45, 58));
+                                            style::taskButtonHover);
         };
         Color ic = style::text;
         float iy = (hh - SF(16)) / 2;
@@ -2189,14 +2193,13 @@ protected:
 
         // Reloj
         if (hoverKind == HClock) DrawRounded(g, RectF(clockRc.X, (float)S(5), clockRc.Width, (float)hh - S(10)), SF(5),
-                                             C(255, 40, 45, 58));
+                                             style::taskButtonHover);
         DrawTextStr(g, timeText, fontBody, style::text, RectF(clockRc.X, SF(4), clockRc.Width, SF(22)), StringAlignmentCenter);
         DrawTextStr(g, dateText, fontSmall, style::textDim, RectF(clockRc.X, SF(24), clockRc.Width, SF(18)),
                     StringAlignmentCenter);
 
         // Mostrar escritorio
-        HLine(g, deskRc.X, deskRc.X, (float)S(12), Color(0, 0, 0, 0));
-        Pen sep(hoverKind == HDesk ? style::accent : C(60, 255, 255, 255), 1.0f);
+        Pen sep(hoverKind == HDesk ? style::accent : style::track, 1.0f);
         g.DrawLine(&sep, deskRc.X, (float)S(12), deskRc.X, (float)hh - S(12));
     }
 
@@ -2330,7 +2333,7 @@ protected:
         AppendMenuW(m, MF_STRING, 6, L"Energía");
         AppendMenuW(m, MF_STRING, 7, L"Fecha y hora");
         SetForegroundWindow(hwnd);
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         switch (cmd) {
         case 1: LaunchOwn(L"--taskmgr"); break;
@@ -2554,22 +2557,22 @@ int InstallShell(bool install) {
             L"  • Menú Inicio > botón de apagado > Restaurar Explorer y luego ejecutar \"OptimizedShellCpp.exe --uninstall\", o\n"
             L"  • Ctrl+Alt+Supr > Administrador de tareas > Ejecutar nueva tarea > explorer.exe\n\n"
             L"¿Continuar?";
-        if (MessageBoxW(nullptr, msg.c_str(), L"Instalar OptimizedShell", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
+        if (ui::MsgBox(nullptr, msg.c_str(), L"Instalar OptimizedShell", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
             return 1;
         std::wstring value = Quote(GetOwnPath());
         LSTATUS st = RegSetKeyValueW(HKEY_CURRENT_USER, kWinlogonKey, L"Shell", REG_SZ, value.c_str(),
                                      (DWORD)((value.size() + 1) * sizeof(wchar_t)));
-        MessageBoxW(nullptr, st == ERROR_SUCCESS ? L"Instalado. Cierra sesión y vuelve a entrar para usarlo."
+        ui::MsgBox(nullptr, st == ERROR_SUCCESS ? L"Instalado. Cierra sesión y vuelve a entrar para usarlo."
                                                  : L"No se pudo escribir en el registro.",
                     L"OptimizedShell", st == ERROR_SUCCESS ? MB_ICONINFORMATION : MB_ICONERROR);
         return st == ERROR_SUCCESS ? 0 : 1;
     }
-    if (MessageBoxW(nullptr, L"¿Volver a usar Explorer como shell a partir del próximo inicio de sesión?",
+    if (ui::MsgBox(nullptr, L"¿Volver a usar Explorer como shell a partir del próximo inicio de sesión?",
                     L"Desinstalar OptimizedShell", MB_YESNO | MB_ICONQUESTION) != IDYES)
         return 1;
     LSTATUS st = RegDeleteKeyValueW(HKEY_CURRENT_USER, kWinlogonKey, L"Shell");
     bool ok = st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND;
-    MessageBoxW(nullptr, ok ? L"Listo. Explorer volverá a ser el shell en el próximo inicio de sesión."
+    ui::MsgBox(nullptr, ok ? L"Listo. Explorer volverá a ser el shell en el próximo inicio de sesión."
                             : L"No se pudo modificar el registro.",
                 L"OptimizedShell", ok ? MB_ICONINFORMATION : MB_ICONERROR);
     return ok ? 0 : 1;
@@ -2581,8 +2584,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (HasArg(L"--logon") || HasArg(L"--lock")) return RunLogonUIMode(HasArg(L"--demo"), HasArg(L"--lock"));
     if (HasArg(L"--taskmgr")) return RunTaskManagerMode();
     if (HasArg(L"--explorer")) return RunExplorerMode();
-    if (HasArg(L"--install")) return InstallShell(true);
-    if (HasArg(L"--uninstall")) return InstallShell(false);
+    if (HasArg(L"--settings")) return RunSettingsMode();
+    if (HasArg(L"--install") || HasArg(L"--uninstall")) {
+        InitUi(hInst); // los diálogos usan el tema propio
+        int r = InstallShell(HasArg(L"--install"));
+        ShutdownUi();
+        return r;
+    }
 
     // Un solo shell por sesión.
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\OptimizedShell.Shell");
@@ -2604,7 +2612,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     {
         ShellApp app;
         if (!app.Start()) {
-            MessageBoxW(nullptr, L"No se pudo iniciar OptimizedShell.", L"OptimizedShell", MB_ICONERROR | MB_OK);
+            ui::MsgBox(nullptr, L"No se pudo iniciar OptimizedShell.", L"OptimizedShell", MB_ICONERROR | MB_OK);
             rc = 1;
         } else {
             app.Run();

@@ -33,9 +33,10 @@ namespace {
 using namespace Gdiplus;
 using namespace ui;
 
-const Color kGreen(255, 74, 222, 128);
-const Color kAmber(255, 251, 191, 36);
-const Color kRed(255, 248, 113, 113);
+// Colores semánticos: referencias a los tokens del tema (cambian con él).
+const Color& kGreen = style::success;
+const Color& kAmber = style::warning;
+const Color& kRed = style::danger;
 const Color kPurple(255, 167, 139, 250);
 const Color kTeal(255, 45, 212, 191);
 
@@ -260,15 +261,17 @@ struct Table {
     void Paint(Graphics& g, int count, const Source& src, const wchar_t* emptyMsg) {
         for (size_t i = 0; i < cols.size(); ++i) {
             RectF r(x[i] + S(2), header.Y, x[i + 1] - x[i] - S(10), header.Height);
+            // Columnas numéricas: la flecha va a la derecha y el título se desplaza para dejarle sitio.
+            if ((int)i == sortCol && cols[i].right) r.Width -= S(18);
             DrawTextStr(g, cols[i].title, fontSmallBold, (int)i == sortCol ? style::text : style::textDim, r,
                         cols[i].right ? StringAlignmentFar : StringAlignmentNear);
             if ((int)i == sortCol) {
-                float ax = cols[i].right ? x[i] + S(4) : x[i + 1] - S(20);
+                float ax = x[i + 1] - S(24);
                 DrawTextStr(g, sortDesc ? L"" : L"", fontIcon, style::accent,
                             RectF(ax, header.Y, (float)S(14), header.Height), StringAlignmentCenter);
             }
         }
-        HLine(g, header.X, header.X + header.Width, header.Y + header.Height - 1, C(30, 255, 255, 255));
+        HLine(g, header.X, header.X + header.Width, header.Y + header.Height - 1, style::separator);
         Clamp(count);
         int vis = Visible();
         for (int row = 0; row < vis; ++row) {
@@ -325,7 +328,7 @@ protected:
         int y = orc.top + ((orc.bottom - orc.top) - h) / 2;
         if (!Create(L"OShellCppTaskDialog", WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WS_POPUP | WS_CLIPCHILDREN, x, y, w, h, t.c_str()))
             return false;
-        EnableDarkFrame(hwnd);
+        SetFrame(FrameOpaque);
         okRc = RectF((float)w - S(20) - S(104), (float)h - S(20) - S(34), (float)S(104), (float)S(34));
         cancelRc = RectF(okRc.X - S(10) - S(104), okRc.Y, (float)S(104), (float)S(34));
         EnableWindow(owner, FALSE);
@@ -338,8 +341,8 @@ protected:
     }
 
     void PaintFrame(Graphics& g, int w, int h, const std::wstring& subtitle) {
-        g.Clear(RGBc(20, 23, 31));
-        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), 0, Color(0, 0, 0, 0), C(60, 255, 255, 255));
+        g.Clear(style::dialogBg);
+        DrawRounded(g, RectF(0, 0, (float)w - 1, (float)h - 1), 0, Color(0, 0, 0, 0), style::cardBorder);
         DrawTextStr(g, title, fontTitle, style::text, RectF((float)S(20), (float)S(16), (float)w - S(40), (float)S(30)));
         if (!subtitle.empty())
             DrawTextStr(g, subtitle, fontSmall, style::textDim, RectF((float)S(20), (float)S(46), (float)w - S(40), (float)S(20)));
@@ -411,12 +414,9 @@ protected:
 
     void OnPaint(Graphics& g, int w, int h) override {
         PaintFrame(g, w, h, L"Escribe el nombre de un programa, carpeta, documento o recurso de Internet.");
-        DrawRounded(g, field, SF(6), C(255, 35, 40, 52), style::accent, 1.2f);
-        RectF box(adminRc.X, adminRc.Y + S(3), (float)S(18), (float)S(18));
-        DrawRounded(g, box, SF(4), admin ? style::accentSolid : C(255, 35, 40, 52), C(90, 255, 255, 255));
-        if (admin) DrawCheck(g, box.X + box.Width / 2, box.Y + box.Height / 2, box.Width * 0.6f, RGBc(255, 255, 255), SF(1.8f));
-        DrawTextStr(g, L"Crear esta tarea con privilegios de administrador", fontSmall, style::text,
-                    RectF(adminRc.X + S(28), adminRc.Y, (float)S(320), adminRc.Height));
+        style::DrawField(g, field, true);
+        style::DrawCheckbox(g, RectF(adminRc.X, adminRc.Y, (float)S(380), adminRc.Height), admin,
+                            L"Crear esta tarea con privilegios de administrador");
     }
 
     void OnMouseDown(int x, int y) override {
@@ -446,7 +446,7 @@ protected:
             ok = RunCommandLine(cmd, hwnd);
         }
         if (ok) Finish();
-        else MessageBoxW(hwnd, (L"No se encuentra \"" + cmd + L"\".").c_str(), L"Crear nueva tarea", MB_ICONWARNING);
+        else ui::MsgBox(hwnd, (L"No se encuentra \"" + cmd + L"\".").c_str(), L"Crear nueva tarea", MB_ICONWARNING);
     }
 };
 
@@ -458,7 +458,7 @@ public:
         DWORD_PTR sys = 0;
         if (!hp || !GetProcessAffinityMask(hp, &mask, &sys)) {
             if (hp) CloseHandle(hp);
-            MessageBoxW(own, L"No se puede consultar la afinidad de este proceso (puede requerir administrador).",
+            ui::MsgBox(own, L"No se puede consultar la afinidad de este proceso (puede requerir administrador).",
                         L"Establecer afinidad", MB_ICONWARNING);
             return false;
         }
@@ -487,12 +487,7 @@ protected:
     void OnPaint(Graphics& g, int w, int h) override {
         PaintFrame(g, w, h, L"Elige en qué procesadores lógicos puede ejecutarse.");
         bool all = (mask & systemMask) == systemMask;
-        auto box = [&](const RectF& r, bool on, const std::wstring& label) {
-            RectF b(r.X, r.Y + (r.Height - S(18)) / 2, (float)S(18), (float)S(18));
-            DrawRounded(g, b, SF(4), on ? style::accentSolid : C(255, 35, 40, 52), C(90, 255, 255, 255));
-            if (on) DrawCheck(g, b.X + b.Width / 2, b.Y + b.Height / 2, b.Width * 0.6f, RGBc(255, 255, 255), SF(1.8f));
-            DrawTextStr(g, label, fontSmall, style::text, RectF(b.X + S(24), r.Y, r.Width - S(24), r.Height));
-        };
+        auto box = [&](const RectF& r, bool on, const std::wstring& label) { style::DrawCheckbox(g, r, on, label); };
         box(AllRc(), all, L"Todos los procesadores");
         for (int i = 0; i < cpus; ++i) box(Cell(i), (mask >> i) & 1, L"CPU " + std::to_wstring(i));
     }
@@ -510,7 +505,7 @@ protected:
 
     void Accept() override {
         if (!(mask & systemMask)) {
-            MessageBoxW(hwnd, L"Selecciona al menos un procesador.", L"Afinidad", MB_ICONINFORMATION);
+            ui::MsgBox(hwnd, L"Selecciona al menos un procesador.", L"Afinidad", MB_ICONINFORMATION);
             return;
         }
         HANDLE hp = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -518,7 +513,7 @@ protected:
         DWORD err = GetLastError();
         if (hp) CloseHandle(hp);
         if (!ok) {
-            MessageBoxW(hwnd, (L"No se pudo cambiar la afinidad:\n" + ErrText(err)).c_str(), L"Afinidad", MB_ICONWARNING);
+            ui::MsgBox(hwnd, (L"No se pudo cambiar la afinidad:\n" + ErrText(err)).c_str(), L"Afinidad", MB_ICONWARNING);
             return;
         }
         Finish();
@@ -550,7 +545,7 @@ public:
         if (!Create(L"OShellCppTaskMgr", WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, w, h,
                     L"Administrador de tareas"))
             return false;
-        EnableDarkFrame(hwnd);
+        SetFrame(FrameOpaque);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         SHSTOCKICONINFO sii = { sizeof(sii) };
         if (SUCCEEDED(SHGetStockIconInfo(SIID_DESKTOPPC, SHGSI_ICON | SHGSI_SMALLICON, &sii))) {
@@ -1194,7 +1189,7 @@ protected:
         const std::wstring name = p->name;
         if (pid == GetCurrentProcessId()) return;
         if (IsCritical(name)) {
-            MessageBoxW(hwnd, (L"\"" + name + L"\" es un proceso esencial de Windows. Finalizarlo bloquearía o reiniciaría el equipo.").c_str(),
+            ui::MsgBox(hwnd, (L"\"" + name + L"\" es un proceso esencial de Windows. Finalizarlo bloquearía o reiniciaría el equipo.").c_str(),
                         L"Administrador de tareas", MB_ICONWARNING);
             return;
         }
@@ -1204,7 +1199,7 @@ protected:
             ? L"¿Finalizar \"" + name + L"\" y sus " + std::to_wstring(targets.size()) + L" procesos secundarios?"
             : L"¿Finalizar \"" + name + L"\" (PID " + std::to_wstring(pid) + L")?";
         msg += L"\n\nSe perderán los datos sin guardar.";
-        if (MessageBoxW(hwnd, msg.c_str(), L"Finalizar tarea", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+        if (ui::MsgBox(hwnd, msg.c_str(), L"Finalizar tarea", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
         std::reverse(targets.begin(), targets.end()); // hijos primero
         targets.push_back(pid);
         DWORD failed = 0, lastErr = 0;
@@ -1214,7 +1209,7 @@ protected:
             if (hp) CloseHandle(hp);
         }
         if (failed)
-            MessageBoxW(hwnd, (L"No se pudo finalizar " + std::to_wstring(failed) + L" proceso(s):\n" + ErrText(lastErr) +
+            ui::MsgBox(hwnd, (L"No se pudo finalizar " + std::to_wstring(failed) + L" proceso(s):\n" + ErrText(lastErr) +
                                (elevated ? L"" : L"\n\nPrueba a reiniciar el Administrador de tareas como administrador."))
                                   .c_str(),
                         L"Finalizar tarea", MB_ICONWARNING);
@@ -1248,20 +1243,20 @@ protected:
                  SetPriorityClass(hp, on ? IDLE_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS);
             CloseHandle(hp);
         }
-        if (!ok) MessageBoxW(hwnd, (L"No se pudo cambiar el modo eficiencia:\n" + ErrText(GetLastError())).c_str(),
+        if (!ok) ui::MsgBox(hwnd, (L"No se pudo cambiar el modo eficiencia:\n" + ErrText(GetLastError())).c_str(),
                              L"Modo eficiencia", MB_ICONWARNING);
     }
 
     void SetPriority(DWORD pid, DWORD cls) {
         if (cls == REALTIME_PRIORITY_CLASS &&
-            MessageBoxW(hwnd, L"La prioridad en tiempo real puede dejar el sistema sin respuesta. ¿Continuar?",
+            ui::MsgBox(hwnd, L"La prioridad en tiempo real puede dejar el sistema sin respuesta. ¿Continuar?",
                         L"Cambiar prioridad", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
             return;
         HANDLE hp = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
         bool ok = hp && SetPriorityClass(hp, cls);
         DWORD err = GetLastError();
         if (hp) CloseHandle(hp);
-        if (!ok) MessageBoxW(hwnd, (L"No se pudo cambiar la prioridad:\n" + ErrText(err)).c_str(), L"Cambiar prioridad",
+        if (!ok) ui::MsgBox(hwnd, (L"No se pudo cambiar la prioridad:\n" + ErrText(err)).c_str(), L"Cambiar prioridad",
                              MB_ICONWARNING);
     }
 
@@ -1335,7 +1330,7 @@ protected:
         AppendMenuW(m, MF_STRING | (path.empty() ? MF_GRAYED : 0), 6, L"Abrir ubicación del archivo");
         AppendMenuW(m, MF_STRING | (path.empty() ? MF_GRAYED : 0), 7, L"Propiedades");
         AppendMenuW(m, MF_STRING, 8, L"Copiar detalles");
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         switch (cmd) {
         case 1: EndProcess(false); break;
@@ -1403,9 +1398,9 @@ protected:
             std::wstring msg = L"No se pudo cambiar el estado de \"" + e->name + L"\":\n" + ErrText(st);
             if (st == ERROR_ACCESS_DENIED && !elevated) {
                 msg += L"\n\n¿Reiniciar el Administrador de tareas como administrador?";
-                if (MessageBoxW(hwnd, msg.c_str(), L"Inicio", MB_YESNO | MB_ICONWARNING) == IDYES) RestartElevated();
+                if (ui::MsgBox(hwnd, msg.c_str(), L"Inicio", MB_YESNO | MB_ICONWARNING) == IDYES) RestartElevated();
             } else {
-                MessageBoxW(hwnd, msg.c_str(), L"Inicio", MB_ICONWARNING);
+                ui::MsgBox(hwnd, msg.c_str(), L"Inicio", MB_ICONWARNING);
             }
             return;
         }
@@ -1421,7 +1416,7 @@ protected:
         AppendMenuW(m, MF_STRING, 1, e->enabled ? L"Deshabilitar" : L"Habilitar");
         AppendMenuW(m, MF_STRING, 2, L"Abrir ubicación del archivo");
         AppendMenuW(m, MF_STRING, 3, L"Copiar comando");
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         if (cmd == 1) ToggleStartupItem();
         else if (cmd == 2) OpenInExplorer(startup::TargetPath(*e), true);
@@ -1447,7 +1442,7 @@ protected:
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING | (pid ? 0 : MF_GRAYED), 4, L"Ir al proceso");
         AppendMenuW(m, MF_STRING, 5, L"Copiar nombre");
-        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+        int cmd = ui::ThemedMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
         DestroyMenu(m);
         switch (cmd) {
         case 1: ServiceAction(0, name); break;
@@ -1542,11 +1537,11 @@ protected:
                     RectF(tabRc[TabCount - 1].X + tabRc[TabCount - 1].Width + S(16), tabRc[0].Y,
                           (float)w - (tabRc[TabCount - 1].X + tabRc[TabCount - 1].Width + S(32)), tabRc[0].Height),
                     StringAlignmentFar);
-        HLine(g, 0, (float)w, tabRc[0].Y + tabRc[0].Height + S(2), C(30, 255, 255, 255));
+        HLine(g, 0, (float)w, tabRc[0].Y + tabRc[0].Height + S(2), style::separator);
 
         // Barra de herramientas
         if (tab != TabPerf) {
-            DrawRounded(g, searchRc, SF(6), C(255, 35, 40, 52), C(45, 255, 255, 255));
+            style::DrawField(g, searchRc, GetFocus() == search);
             DrawTextStr(g, L"", fontIcon, style::textDim,
                         RectF(searchRc.X + S(8), searchRc.Y, (float)S(20), searchRc.Height), StringAlignmentCenter);
         } else {
@@ -1651,10 +1646,10 @@ protected:
     }
 
     void DrawGraph(Graphics& g, const RectF& rc, const History& h, float maxV, const Color& color, bool grid) {
-        DrawRounded(g, rc, SF(6), C(255, 22, 26, 35), C(40, 255, 255, 255));
+        DrawRounded(g, rc, SF(6), style::graphBg, style::cardBorder);
         if (grid) {
-            for (int i = 1; i < 4; ++i) HLine(g, rc.X, rc.X + rc.Width, rc.Y + rc.Height * i / 4, C(18, 255, 255, 255));
-            Pen vp(C(18, 255, 255, 255), 1.0f);
+            for (int i = 1; i < 4; ++i) HLine(g, rc.X, rc.X + rc.Width, rc.Y + rc.Height * i / 4, style::gridLine);
+            Pen vp(style::gridLine, 1.0f);
             for (int i = 1; i < 6; ++i) g.DrawLine(&vp, rc.X + rc.Width * i / 6, rc.Y, rc.X + rc.Width * i / 6, rc.Y + rc.Height);
         }
         if (h.count < 2 || maxV <= 0) return;
@@ -1704,7 +1699,7 @@ protected:
         for (int k = 0; k < PerfCount; ++k) {
             PerfInfo in = Info(k);
             RectF r = perfItemRc[k];
-            if (k == perfSel) DrawRounded(g, r, SF(6), C(60, 59, 130, 246));
+            if (k == perfSel) DrawRounded(g, r, SF(6), style::rowSelected);
             else if (hoverBtn == 40 + k) DrawRounded(g, r, SF(6), style::rowHover);
             RectF spark(r.X + S(8), r.Y + S(8), (float)S(70), r.Height - S(16));
             DrawGraph(g, spark, hist[k], in.maxV, in.color, false);
@@ -1713,7 +1708,7 @@ protected:
             DrawTextStr(g, in.value, fontSmall, style::text, RectF(tx, r.Y + S(26), r.Width - (tx - r.X) - S(4), (float)S(18)));
             DrawTextStr(g, in.sub, fontSmall, style::textFaint, RectF(tx, r.Y + S(43), r.Width - (tx - r.X) - S(4), (float)S(18)));
         }
-        Pen sep(C(30, 255, 255, 255), 1.0f);
+        Pen sep(style::separator, 1.0f);
         g.DrawLine(&sep, perfListRc.X + perfListRc.Width + S(8), perfListRc.Y, perfListRc.X + perfListRc.Width + S(8),
                    perfListRc.Y + perfListRc.Height);
 
@@ -1779,10 +1774,10 @@ protected:
                 float cy = after + (i / perRow) * (bh + S(22));
                 if (cy + bh > d.Y + d.Height) break;
                 RectF bar(cx, cy, cw - S(6), bh);
-                DrawRounded(g, bar, SF(4), C(255, 22, 26, 35), C(40, 255, 255, 255));
+                DrawRounded(g, bar, SF(4), style::graphBg, style::cardBorder);
                 float fillH = bar.Height * coreUsage[i] / 100.0f;
                 if (fillH > 1) DrawRounded(g, RectF(bar.X, bar.Y + bar.Height - fillH, bar.Width, fillH), SF(4),
-                                           Color(170, 76, 141, 255));
+                                           WithAlpha(style::accentSolid, 170));
                 DrawTextStr(g, std::to_wstring(i), fontSmall, style::textFaint, RectF(bar.X, cy + bh, bar.Width, (float)S(18)),
                             StringAlignmentCenter);
             }
@@ -1949,6 +1944,7 @@ protected:
     }
 
     void OnCommand(int id, int code) override {
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) InvalidateRectF(searchRc);
         if (id == 100 && code == EN_CHANGE) {
             filter = GetWindowString(search);
             if (tab == TabProc) RebuildProcView();
@@ -1987,7 +1983,7 @@ protected:
         case WM_TASKRESULT: {
             std::unique_ptr<std::wstring> text((std::wstring*)lp);
             if (wp == 1) { // servicio
-                if (text) MessageBoxW(hwnd, text->c_str(), L"Servicios", MB_ICONWARNING);
+                if (text) ui::MsgBox(hwnd, text->c_str(), L"Servicios", MB_ICONWARNING);
                 LoadServices(false);
                 Invalidate();
             } else if (wp == 2) { // liberar RAM
@@ -2034,7 +2030,7 @@ int RunTaskManagerMode() {
     {
         TaskManagerWindow wnd;
         if (!wnd.Start(tab)) {
-            MessageBoxW(nullptr, L"No se pudo abrir el Administrador de tareas.", L"OptimizedShell", MB_ICONERROR | MB_OK);
+            ui::MsgBox(nullptr, L"No se pudo abrir el Administrador de tareas.", L"OptimizedShell", MB_ICONERROR | MB_OK);
         } else {
             ui::RunMessageLoop();
         }

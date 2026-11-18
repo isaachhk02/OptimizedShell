@@ -10,6 +10,7 @@ Un solo ejecutable, `OptimizedShellCpp.exe` (unos 580 KB), con varios modos:
 | Administrador de tareas | `--taskmgr [--tab procesos\|rendimiento\|inicio\|servicios]` | Procesos, gráficas de rendimiento, programas de inicio y servicios |
 | Explorador de archivos | `--explorer [ruta]` · `--explorer --select <archivo>` | Explorador con navegación, búsqueda y operaciones de archivo |
 | Bloqueo / inicio de sesión | `--lock` · `--logon [--demo]` | Pantalla de bloqueo propia |
+| Personalización | `--settings` | Modo claro u oscuro, color de acento y transparencia |
 | Instalación | `--install` · `--uninstall` | Usa OptimizedShell como shell del usuario actual, o vuelve a Explorer |
 
 ## Componentes
@@ -45,6 +46,13 @@ Un solo ejecutable, `OptimizedShellCpp.exe` (unos 580 KB), con varios modos:
 - La carpeta abierta se vigila con `ReadDirectoryChangesW` y se actualiza sola.
 - Copiar, cortar, pegar, eliminar a la Papelera, renombrar y crear carpetas. Usa `IFileOperation` (diálogos estándar y deshacer) y es compatible con el portapapeles de Explorer.
 - Arrastrar y soltar en ambas direcciones, menú contextual nativo bajo demanda ("Más opciones…"), elementos ocultos, "Abrir en Terminal" y atajos de teclado como los de Explorer.
+
+### Tema propio
+- **Opciones:** modo **oscuro** o **claro**, 11 colores de acento (o el color de acento de Windows) y transparencia acrílica, que se puede desactivar para ahorrar GPU.
+- **Dónde se cambia:** menú Inicio > **Personalización**, o `--settings`.
+- **Dónde se guarda:** `%APPDATA%\OptimizedShell\theme.ini`.
+- **Aplicación al momento:** los cambios llegan a todas las ventanas abiertas (shell, explorador, Administrador de tareas, pantalla de bloqueo) sin reiniciarlas.
+- **Alcance:** los menús contextuales, los cuadros de mensaje, los diálogos, las cajas de texto y los tooltips también usan el tema propio. La única excepción es el menú nativo "Más opciones…" del explorador, porque lo dibujan las extensiones de shell.
 
 ## Compilar
 
