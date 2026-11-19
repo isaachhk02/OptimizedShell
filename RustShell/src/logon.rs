@@ -98,7 +98,16 @@ fn paint(st: &State) {
         // reloj
         let mut now: SYSTEMTIME = unsafe { std::mem::zeroed() };
         unsafe { GetLocalTime(&mut now) };
-        let clock = format!("{:02}:{:02}", now.wHour, now.wMinute);
+        // El reloj respeta los ajustes de formato de la barra de tareas.
+        let cfg = crate::ui::config::current();
+        let c24 = cfg.b(crate::ui::config::Id::BarraReloj24h);
+        let hour = if c24 { now.wHour } else { match now.wHour % 12 { 0 => 12, v => v } };
+        let suffix = if c24 { "" } else if now.wHour < 12 { " a. m." } else { " p. m." };
+        let clock = if cfg.b(crate::ui::config::Id::BarraSegundos) {
+            format!("{:02}:{:02}:{:02}{}", hour, now.wMinute, now.wSecond, suffix)
+        } else {
+            format!("{:02}:{:02}{}", hour, now.wMinute, suffix)
+        };
         g.text_in(&clock, 0.0, (h / 2 - ui::s(220)) as f32, w as f32, ui::s(90) as f32, 64.0, false, theme::rgbc(240, 243, 248), Align::Center, Align::Center, false);
         let days = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
         let date = format!("{}, {} de {}", days.get(now.wDayOfWeek as usize).unwrap_or(&""), now.wDay, month(now.wMonth));

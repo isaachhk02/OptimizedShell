@@ -13,8 +13,36 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
 | Administrador de tareas | `--taskmgr` | Procesos (CPU/memoria/hilos), Inicio, Rendimiento, Servicios |
 | Explorador de archivos | `--explorer [ruta]` | Navegación, panel lateral y columnas ordenables |
 | Bloqueo / inicio de sesión | `--lock` · `--logon [--demo]` | Pantalla de bloqueo propia con autenticación |
-| Configuración | `--settings [fondo\|pantalla\|bluetooth]` | Tema, fondo de escritorio, pantalla y Bluetooth |
+| Configuración | `--settings [personalizacion\|barra\|menu\|listas\|rendimiento\|fondo\|pantalla\|bluetooth]` | Toda la interfaz: tema, barra de tareas, menú Inicio, listas y rendimiento |
 | Instalación | `--install` · `--uninstall` | Usa OptimizedShell como shell del usuario actual, o vuelve a Explorer |
+
+## Interfaz configurable
+
+Todos los ajustes viven en una única tabla declarativa (`src/ui/config.rs`): clave
+de INI, etiqueta, ayuda, tipo (interruptor, entero con rango y paso, lista de
+opciones, tarjetas o color) y valor por defecto. La ventana de Configuración se
+dibuja recorriendo esa tabla, así que **añadir un ajuste es añadir una fila**.
+
+- **Persistencia**: `%APPDATA%\OptimizedShell\config.ini`, agrupado por secciones
+  y editable a mano (el antiguo `theme.ini` se importa la primera vez).
+- **En caliente**: cada cambio se aplica al momento y se difunde al resto de
+  ventanas de OptimizedShell (barra de tareas, explorador y administrador se
+  reajustan sin reiniciar).
+- **Qué se puede cambiar**:
+  - *Personalización*: modo claro/oscuro, color de acento (paleta, R/G/B o el de
+    Windows), desenfoque, tinte del fondo, contraste del texto secundario,
+    opacidad de barra y ventanas, radio de las esquinas, escala de la interfaz,
+    tamaño del texto, familia tipográfica y alto/ancho de la barra de título.
+  - *Barra de tareas*: alto, posición (arriba/abajo), alineación de los botones,
+    ancho de botón, títulos, botón Inicio, reloj (12/24 h, segundos, fecha),
+    reserva del área de trabajo, siempre visible e intervalo de refresco.
+  - *Menú Inicio*: ancho, alto de elemento, iconos y qué entradas incluye.
+  - *Listas y explorador*: alto de fila, panel lateral, archivos ocultos,
+    carpetas primero, columnas Fecha/Tipo/Tamaño y refresco del administrador.
+  - *Rendimiento*: EcoQoS y liberación de memoria.
+- **Atajos**: rueda del ratón para desplazar, flechas ←/→ sobre un control para
+  ajustarlo, y botones «Restablecer esta página», «Restablecer todo» y «Abrir
+  config.ini». El botón derecho sobre la barra de tareas abre su página.
 
 ## Diseño orientado al mínimo consumo
 
@@ -48,9 +76,9 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 - **Administrador de tareas**: marco propio (barra de título, min/max/cerrar), pestañas,
   tabla de procesos con %CPU por delta y colores por umbral, filtrado, fin de proceso y
   pestaña Inicio (habilitar/deshabilitar con las claves StartupApproved de Windows).
-- **Configuración**: página de Personalización completa (modo claro/oscuro, acentos,
-  desenfoque y opacidades) que guarda en `%APPDATA%\OptimizedShell\theme.ini` y se aplica
-  al momento.
+- **Configuración**: cinco páginas generadas desde la tabla de ajustes
+  (Personalización, Barra de tareas, Menú Inicio, Listas y explorador,
+  Rendimiento), con guardado en `config.ini` y aplicación en caliente.
 - **Explorador**: navegación (atrás/adelante/arriba), panel lateral de accesos, columnas
   Nombre/Fecha/Tipo/Tamaño ordenables y apertura de archivos.
 - **Bloqueo**: reloj, tarjeta de usuario y autenticación con `LogonUserW`.

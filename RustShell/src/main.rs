@@ -7,6 +7,8 @@
 
 mod args;
 mod ui;
+mod apps;
+mod perf;
 mod startup;
 mod taskmgr;
 mod settings;

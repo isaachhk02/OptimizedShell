@@ -4,6 +4,7 @@
 // reducir el consumo del propio proceso.
 #![allow(dead_code)]
 
+pub mod config;
 pub mod theme;
 pub mod gdip;
 pub mod window;
@@ -36,14 +37,71 @@ pub fn hinst() -> HINSTANCE {
     (*G_HINST.get().unwrap_or(&0)) as HINSTANCE
 }
 
-/// Escala un valor de 96 DPI al DPI actual (equivale a ui::S).
+/// Escala un valor de 96 DPI al DPI actual y a la escala elegida por el
+/// usuario (ajuste «Escala de la interfaz»). Equivale a ui::S.
 pub fn s(v: i32) -> i32 {
-    (v as i64 * dpi() as i64 / 96) as i32
+    (v as i64 * dpi() as i64 * config::scale_pct() as i64 / (96 * 100)) as i32
 }
 
 /// Escala un valor en coma flotante (equivale a ui::SF).
 pub fn sf(v: f32) -> f32 {
-    v * dpi() as f32 / 96.0
+    v * dpi() as f32 / 96.0 * config::scale_pct() as f32 / 100.0
+}
+
+/// Alto de la barra de título de las ventanas con marco propio (configurable).
+pub fn caption_h() -> i32 {
+    s(config::current().get(config::Id::AltoTitulo))
+}
+
+/// Mensaje de difusión que avisa de un cambio de configuración.
+pub fn config_changed_msg() -> u32 {
+    static MSG: OnceLock<u32> = OnceLock::new();
+    *MSG.get_or_init(|| unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(
+            wide("OptimizedShell.ThemeChanged").as_ptr(),
+        )
+    })
+}
+
+/// Avisa a todas las ventanas de OptimizedShell de que la configuración cambió.
+pub fn broadcast_config_changed() {
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SendNotifyMessageW(
+            windows_sys::Win32::UI::WindowsAndMessaging::HWND_BROADCAST,
+            config_changed_msg(),
+            0,
+            0,
+        );
+    }
+}
+
+/// Publica una configuración: la guarda, recalcula tema y fuentes y avisa.
+pub fn apply_config(c: &config::Config, persist: bool) {
+    if persist {
+        config::save(c);
+    }
+    config::set_current(*c);
+    theme::apply(c);
+    gdip::invalidate_cache();
+}
+
+/// Relee la configuración del disco y recalcula tema y fuentes. Para usar al
+/// recibir el mensaje de difusión.
+pub fn reload_config() -> config::Config {
+    let c = config::load();
+    config::set_current(c);
+    theme::apply(&c);
+    gdip::invalidate_cache();
+    c
+}
+
+/// Aplica los ajustes de rendimiento de la configuración al proceso actual.
+pub fn apply_perf() {
+    let c = config::current();
+    set_process_eco(c.b(config::Id::Eco));
+    if c.b(config::Id::LiberarMemoria) {
+        trim_working_set();
+    }
 }
 
 // ------------------------------------------------------------ cadenas
@@ -70,7 +128,9 @@ pub fn init(inst: HINSTANCE) {
         let _ = G_DPI.set(dpi);
     }
     gdip::startup();
-    theme::apply(theme::load());
+    let c = config::load();
+    config::set_current(c);
+    theme::apply(&c);
 }
 
 /// Libera GDI+ y recursos. Equivale a ui::ShutdownUi.

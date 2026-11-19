@@ -1,11 +1,14 @@
-// Tema compartido: tokens de color, carga/guardado de theme.ini y ApplyTheme.
-// Port de la sección de tema de CppShell/src/ui.h. Todos los colores de la
-// interfaz salen de estos tokens; shell, explorador, administrador de tareas,
-// menús y diálogos comparten tema.
+// Tema compartido: tokens de color calculados a partir de la configuración.
+// Todos los colores de la interfaz salen de estos tokens; shell, explorador,
+// administrador de tareas, menús y diálogos comparten tema.
+//
+// La persistencia vive en `ui::config` (config.ini); aquí solo se traducen los
+// ajustes de apariencia (modo, acento, opacidades, tinte y contraste) a colores.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::sync::Mutex;
+
+use super::config::{self, Config, Id};
 
 /// Color GDI+ en formato ARGB (0xAARRGGBB).
 pub type Color = u32;
@@ -38,6 +41,11 @@ pub fn mix(a: Color, b: Color, t: f32, alpha: u8) -> Color {
     argb(alpha, m(r_of(a), r_of(b)), m(g_of(a), g_of(b)), m(b_of(a), b_of(b)))
 }
 
+/// Mezcla conservando el alfa del color original.
+fn tint(c: Color, towards: Color, t: f32) -> Color {
+    mix(c, towards, t, a_of(c))
+}
+
 /// Opacidad 0-100 -> canal alfa 0-255.
 fn opacity_alpha(op: i32) -> u8 {
     let op = op.clamp(0, 100);
@@ -54,30 +62,8 @@ pub fn from_colorref(c: u32) -> Color {
     from_ref(c, 255)
 }
 
-// ------------------------------------------------------------ configuración
-#[derive(Clone, Copy, PartialEq)]
-pub struct ThemeSettings {
-    pub dark: bool,
-    pub accent: u32, // COLORREF (0x00BBGGRR)
-    pub blur: bool,
-    pub taskbar_opacity: i32, // 0-100
-    pub window_opacity: i32,  // 0-100
-}
-
-impl Default for ThemeSettings {
-    fn default() -> Self {
-        ThemeSettings {
-            dark: true,
-            accent: colorref(59, 130, 246),
-            blur: true,
-            taskbar_opacity: 60,
-            window_opacity: 96,
-        }
-    }
-}
-
 #[inline]
-const fn colorref(r: u8, g: u8, b: u8) -> u32 {
+pub const fn colorref(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
@@ -99,73 +85,6 @@ pub const ACCENT_PRESETS: &[AccentPreset] = &[
     AccentPreset { color: colorref(139, 92, 246), name: "Violeta" },
     AccentPreset { color: colorref(100, 116, 139), name: "Pizarra" },
 ];
-
-fn config_dir() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_default();
-    let dir = PathBuf::from(base).join("OptimizedShell");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
-
-fn theme_file() -> PathBuf {
-    config_dir().join("theme.ini")
-}
-
-// INI mínimo: solo la sección [Tema] con pares clave=valor. Suficiente para el
-// único archivo de configuración que usa OptimizedShell.
-fn read_ini() -> Vec<(String, String)> {
-    let text = std::fs::read_to_string(theme_file()).unwrap_or_default();
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('[') || line.starts_with(';') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            out.push((k.trim().to_string(), v.trim().to_string()));
-        }
-    }
-    out
-}
-
-fn ini_get<'a>(kv: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    kv.iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(key))
-        .map(|(_, v)| v.as_str())
-}
-
-fn ini_int(kv: &[(String, String)], key: &str, def: i32) -> i32 {
-    ini_get(kv, key).and_then(|v| v.parse().ok()).unwrap_or(def)
-}
-
-pub fn load() -> ThemeSettings {
-    let kv = read_ini();
-    let dark = !ini_get(&kv, "Modo").map(|m| m.eq_ignore_ascii_case("claro")).unwrap_or(false);
-    let accent = ini_get(&kv, "Acento")
-        .and_then(|h| u32::from_str_radix(h, 16).ok())
-        .map(|rgb| colorref(((rgb >> 16) & 0xFF) as u8, ((rgb >> 8) & 0xFF) as u8, (rgb & 0xFF) as u8))
-        .unwrap_or_else(|| colorref(59, 130, 246));
-    // Compatibilidad con la clave antigua "Transparencia".
-    let legacy = ini_int(&kv, "Transparencia", 1) != 0;
-    let blur = ini_int(&kv, "Desenfoque", if legacy { 1 } else { 0 }) != 0;
-    let taskbar_opacity = ini_int(&kv, "OpacidadBarra", if legacy { 60 } else { 100 }).clamp(0, 100);
-    let window_opacity = ini_int(&kv, "OpacidadVentanas", if legacy { 96 } else { 100 }).clamp(0, 100);
-    ThemeSettings { dark, accent, blur, taskbar_opacity, window_opacity }
-}
-
-pub fn save(t: &ThemeSettings) {
-    let (r, g, b) = (t.accent & 0xFF, (t.accent >> 8) & 0xFF, (t.accent >> 16) & 0xFF);
-    let contents = format!(
-        "[Tema]\nModo={}\nAcento={:02X}{:02X}{:02X}\nDesenfoque={}\nOpacidadBarra={}\nOpacidadVentanas={}\nTransparencia={}\n",
-        if t.dark { "oscuro" } else { "claro" },
-        r, g, b,
-        if t.blur { 1 } else { 0 },
-        t.taskbar_opacity,
-        t.window_opacity,
-        if t.blur { 1 } else { 0 },
-    );
-    let _ = std::fs::write(theme_file(), contents);
-}
 
 // ------------------------------------------------------------ tokens de estilo
 #[derive(Clone, Copy)]
@@ -215,34 +134,48 @@ pub struct Style {
 }
 
 static STYLE: Mutex<Option<Style>> = Mutex::new(None);
-static CURRENT: Mutex<Option<ThemeSettings>> = Mutex::new(None);
 
 /// Devuelve una copia del estilo actual. Barato (todos los campos son Copy).
 pub fn style() -> Style {
-    STYLE.lock().unwrap().expect("ApplyTheme no llamado")
+    let cached = *STYLE.lock().unwrap();
+    match cached {
+        Some(s) => s,
+        None => {
+            // Primer uso sin apply(): calcula con la configuración activa.
+            let s = compute(&config::current());
+            *STYLE.lock().unwrap() = Some(s);
+            s
+        }
+    }
 }
 
-/// Ajustes de tema actualmente aplicados.
-pub fn current() -> ThemeSettings {
-    CURRENT.lock().unwrap().unwrap_or_default()
+/// Recalcula los tokens a partir de la configuración y los publica.
+pub fn apply(c: &Config) {
+    let s = compute(c);
+    *STYLE.lock().unwrap() = Some(s);
 }
 
-/// Calcula los tokens de color a partir de los ajustes. Port de ui::ApplyTheme.
-pub fn apply(t: ThemeSettings) {
-    let wa = opacity_alpha(t.window_opacity);
-    let ta = opacity_alpha(t.taskbar_opacity);
-    let a = from_ref(t.accent, 255);
+/// Recalcula el tema con la configuración activa.
+pub fn refresh() {
+    apply(&config::current());
+}
+
+fn compute(c: &Config) -> Style {
+    let dark = c.dark();
+    let wa = opacity_alpha(c.get(Id::OpacidadVentanas));
+    let ta = opacity_alpha(c.get(Id::OpacidadBarra));
+    let a = from_ref(c.accent_colorref(), 255);
     let white = argb(255, 255, 255, 255);
     let black = argb(255, 0, 0, 0);
     let lum = (0.299 * r_of(a) as f32 + 0.587 * g_of(a) as f32 + 0.114 * b_of(a) as f32) / 255.0;
 
     let mut s: Style = unsafe { std::mem::zeroed() };
-    s.dark = t.dark;
-    s.blur = t.blur;
-    s.taskbar_opacity = t.taskbar_opacity;
-    s.window_opacity = t.window_opacity;
+    s.dark = dark;
+    s.blur = c.b(Id::Desenfoque);
+    s.taskbar_opacity = c.get(Id::OpacidadBarra);
+    s.window_opacity = c.get(Id::OpacidadVentanas);
 
-    if t.dark {
+    if dark {
         s.window_bg = argb(wa, 17, 20, 27);
         s.title_bg = argb(wa, 23, 27, 36);
         s.card_bg = rgbc(27, 31, 41);
@@ -314,11 +247,32 @@ pub fn apply(t: ThemeSettings) {
         s.row_selected = with_alpha(a, 60);
     }
     s.accent_solid = a;
-    s.accent_hover = if t.dark { mix(a, white, 0.12, 255) } else { mix(a, black, 0.1, 255) };
+    s.accent_hover = if dark { mix(a, white, 0.12, 255) } else { mix(a, black, 0.1, 255) };
     s.on_accent = if lum > 0.68 { rgbc(20, 20, 24) } else { white };
     s.focus_ring = with_alpha(s.accent, 150);
     s.close_hover = rgbc(196, 43, 43);
 
-    *STYLE.lock().unwrap() = Some(s);
-    *CURRENT.lock().unwrap() = Some(t);
+    // Tinte de los fondos hacia el acento (0-40 %).
+    let t = c.get(Id::TinteFondo) as f32 / 100.0;
+    if t > 0.0 {
+        for f in [
+            &mut s.window_bg, &mut s.title_bg, &mut s.card_bg, &mut s.nav_bg,
+            &mut s.dialog_bg, &mut s.menu_bg, &mut s.taskbar_bg, &mut s.flyout_bg,
+            &mut s.control_bg, &mut s.graph_bg, &mut s.task_button, &mut s.row_hover,
+        ] {
+            *f = tint(*f, a, t);
+        }
+        s.control_hover = tint(s.control_hover, a, t);
+        s.menu_hover = tint(s.menu_hover, a, t);
+        s.task_button_hover = tint(s.task_button_hover, a, t);
+        s.task_button_active = tint(s.task_button_active, a, t);
+    }
+
+    // Contraste del texto secundario (acerca los tonos atenuados al principal).
+    let k = c.get(Id::ContrasteTexto) as f32 / 100.0;
+    if k > 0.0 {
+        s.text_dim = tint(s.text_dim, s.text, k);
+        s.text_faint = tint(s.text_faint, s.text, k * 0.8);
+    }
+    s
 }

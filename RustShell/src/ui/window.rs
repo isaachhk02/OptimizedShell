@@ -22,9 +22,17 @@ pub fn apply_frame_opaque(hwnd: HWND, dark: bool) {
     unsafe {
         let d: i32 = if dark { 1 } else { 0 };
         DwmSetWindowAttribute(hwnd, 20, &d as *const _ as *const _, 4); // USE_IMMERSIVE_DARK_MODE
-        let pref: i32 = 2; // DWMWCP_ROUND
+        // Las esquinas del marco siguen el ajuste «Radio de las esquinas»:
+        // 1 = DONOTROUND, 3 = ROUNDSMALL, 2 = ROUND.
+        let r = super::config::current().get(super::config::Id::Radio);
+        let pref: i32 = if r == 0 { 1 } else if r <= 6 { 3 } else { 2 };
         DwmSetWindowAttribute(hwnd, 33, &pref as *const _ as *const _, 4); // WINDOW_CORNER_PREFERENCE
     }
+}
+
+/// Reaplica el marco con la configuración actual (tras un cambio de tema).
+pub fn refresh_frame(hwnd: HWND) {
+    apply_frame_opaque(hwnd, super::config::current().dark());
 }
 
 /// Ejecuta un pintado con doble buffer en respuesta a WM_PAINT. El cierre recibe

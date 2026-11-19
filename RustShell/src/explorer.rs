@@ -23,10 +23,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::args;
 use crate::ui::gdip::{Align, Chrome, Gfx};
+use crate::ui::config::{self, Id};
 use crate::ui::{self, theme, window};
 
-const CAPTION: i32 = 42;
-const ROW_H: i32 = 28;
+
+/// Alto de fila (configurable en Configuración · Listas).
+fn row_h() -> i32 {
+    ui::s(config::current().get(Id::ListaAltoFila))
+}
 
 // Botones.
 const B_NONE: i32 = 0;
@@ -161,13 +165,16 @@ fn read_dir(path: &str) -> Vec<FileItem> {
 }
 
 fn rebuild(st: &mut State) {
+    let cfg = config::current();
     let col = st.sort_col;
     let desc = st.sort_desc;
-    let mut v: Vec<usize> = (0..st.all.len()).collect();
+    let show_hidden = cfg.b(Id::ExplOcultos);
+    let dirs_first = cfg.b(Id::ExplCarpetasPrimero);
+    let mut v: Vec<usize> = (0..st.all.len()).filter(|&i| show_hidden || !st.all[i].hidden).collect();
     v.sort_by(|&a, &b| {
         let (ia, ib) = (&st.all[a], &st.all[b]);
-        // Carpetas primero.
-        if ia.is_dir != ib.is_dir {
+        // Carpetas primero (configurable).
+        if dirs_first && ia.is_dir != ib.is_dir {
             return if ia.is_dir { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
         }
         let ord = match col {
@@ -184,7 +191,7 @@ fn rebuild(st: &mut State) {
 }
 
 fn rows_visible(st: &State) -> i32 {
-    ((st.list_rc.bottom - st.list_rc.top) / ROW_H).max(1)
+    ((st.list_rc.bottom - st.list_rc.top) / row_h()).max(1)
 }
 
 fn navigate(st: &mut State, path: &str, push_history: bool) {
@@ -245,7 +252,7 @@ fn layout(st: &mut State) {
     unsafe { GetClientRect(st.hwnd, &mut rc) };
     let (w, h) = (rc.right, rc.bottom);
     st.chrome = ui::gdip::chrome_rects(w);
-    let y0 = ui::s(CAPTION) + ui::s(6);
+    let y0 = ui::caption_h() + ui::s(6);
     let bs = ui::s(34);
     for i in 0..4 {
         st.btn[i] = rect(ui::s(8) + i as i32 * (bs + ui::s(4)), y0, bs, bs);
@@ -253,28 +260,44 @@ fn layout(st: &mut State) {
     let ax = st.btn[3].right + ui::s(8);
     st.addr_rc = rect(ax, y0, w - ui::s(10) - ax, bs);
 
+    let cfg = config::current();
     let top = y0 + bs + ui::s(8);
     let status_h = ui::s(28);
-    st.nav_rc = rect(0, top, ui::s(220), h - top - status_h);
-    let lx = st.nav_rc.right + 1;
+    let nav_w = if cfg.b(Id::ExplPanelLateral) { ui::s(220) } else { 0 };
+    st.nav_rc = rect(0, top, nav_w, h - top - status_h);
+    let lx = st.nav_rc.right + if nav_w > 0 { 1 } else { ui::s(4) };
     st.header_rc = rect(lx, top, w - lx, ui::s(30));
     st.list_rc = rect(lx, top + ui::s(30), w - lx - ui::s(10), h - top - ui::s(30) - status_h);
     st.status_rc = rect(0, h - status_h, w, status_h);
 
-    let (size_w, type_w, date_w) = (ui::s(100), ui::s(160), ui::s(150));
+    // Columnas: cada una puede ocultarse desde Configuración. Una columna
+    // oculta se colapsa (col_x[i] == col_x[i+1]) y el pintado la salta.
+    let size_w = if cfg.b(Id::ExplColumnaTamano) { ui::s(100) } else { 0 };
+    let type_w = if cfg.b(Id::ExplColumnaTipo) { ui::s(160) } else { 0 };
+    let date_w = if cfg.b(Id::ExplColumnaFecha) { ui::s(150) } else { 0 };
     st.col_x[0] = lx + ui::s(8);
     st.col_x[4] = st.list_rc.right;
     st.col_x[3] = st.col_x[4] - size_w;
     st.col_x[2] = st.col_x[3] - type_w;
     st.col_x[1] = st.col_x[2] - date_w;
+    // Si no cabe el nombre, se van quitando columnas de derecha a izquierda.
     if st.col_x[1] - st.col_x[0] < ui::s(160) {
         st.col_x[1] = st.col_x[3];
         st.col_x[2] = st.col_x[3];
     }
+    if st.col_x[1] - st.col_x[0] < ui::s(120) {
+        st.col_x[1] = st.col_x[4];
+        st.col_x[2] = st.col_x[4];
+        st.col_x[3] = st.col_x[4];
+    }
 
-    st.nav_rects = st.places.iter().enumerate()
-        .map(|(i, _)| rect(ui::s(6), st.nav_rc.top + ui::s(8) + i as i32 * ui::s(30), st.nav_rc.right - ui::s(12), ui::s(30)))
-        .collect();
+    st.nav_rects = if nav_w == 0 {
+        Vec::new()
+    } else {
+        st.places.iter().enumerate()
+            .map(|(i, _)| rect(ui::s(6), st.nav_rc.top + ui::s(8) + i as i32 * ui::s(30), st.nav_rc.right - ui::s(12), ui::s(30)))
+            .collect()
+    };
 }
 
 // ---------------------------------------------------------------- pintado
@@ -336,24 +359,28 @@ fn paint(st: &State) {
                 break;
             }
             let it = &st.all[st.items[idx]];
-            let ry = st.list_rc.top + row * ROW_H;
+            let ry = st.list_rc.top + row * row_h();
             let rr_x = st.list_rc.left + ui::s(2);
             let rr_w = st.list_rc.right - rr_x;
             if idx as isize == st.sel {
-                g.rounded(rr_x as f32, ry as f32, rr_w as f32, (ROW_H - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_selected), None);
+                g.rounded(rr_x as f32, ry as f32, rr_w as f32, (row_h() - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_selected), None);
             } else if row == st.hover_row {
-                g.rounded(rr_x as f32, ry as f32, rr_w as f32, (ROW_H - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_hover), None);
+                g.rounded(rr_x as f32, ry as f32, rr_w as f32, (row_h() - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_hover), None);
             }
             let fg = if it.hidden { s.text_dim } else { s.text };
             // icono (glifo carpeta/archivo)
-            g.text_in(if it.is_dir { "\u{E8B7}" } else { "\u{E7C3}" }, st.col_x[0] as f32, ry as f32, ui::s(18) as f32, (ROW_H - ui::s(2)) as f32, 12.0, false, if it.is_dir { s.accent } else { s.text_dim }, Align::Near, Align::Center, true);
-            g.text_in(&it.name, (st.col_x[0] + ui::s(24)) as f32, ry as f32, (st.col_x[1] - st.col_x[0] - ui::s(28)) as f32, (ROW_H - ui::s(2)) as f32, 12.0, false, fg, Align::Near, Align::Center, false);
+            g.text_in(if it.is_dir { "\u{E8B7}" } else { "\u{E7C3}" }, st.col_x[0] as f32, ry as f32, ui::s(18) as f32, (row_h() - ui::s(2)) as f32, 12.0, false, if it.is_dir { s.accent } else { s.text_dim }, Align::Near, Align::Center, true);
+            g.text_in(&it.name, (st.col_x[0] + ui::s(24)) as f32, ry as f32, (st.col_x[1] - st.col_x[0] - ui::s(28)) as f32, (row_h() - ui::s(2)) as f32, 12.0, false, fg, Align::Near, Align::Center, false);
             if st.col_x[1] != st.col_x[2] {
-                g.text_in(&it.date, (st.col_x[1] + ui::s(2)) as f32, ry as f32, (st.col_x[2] - st.col_x[1] - ui::s(8)) as f32, (ROW_H - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
-                g.text_in(&it.kind, (st.col_x[2] + ui::s(2)) as f32, ry as f32, (st.col_x[3] - st.col_x[2] - ui::s(8)) as f32, (ROW_H - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+                g.text_in(&it.date, (st.col_x[1] + ui::s(2)) as f32, ry as f32, (st.col_x[2] - st.col_x[1] - ui::s(8)) as f32, (row_h() - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
             }
-            let sz = if it.is_dir { String::new() } else { format_bytes(it.size) };
-            g.text_in(&sz, (st.col_x[3] + ui::s(2)) as f32, ry as f32, (st.col_x[4] - st.col_x[3] - ui::s(10)) as f32, (ROW_H - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Far, Align::Center, false);
+            if st.col_x[2] != st.col_x[3] {
+                g.text_in(&it.kind, (st.col_x[2] + ui::s(2)) as f32, ry as f32, (st.col_x[3] - st.col_x[2] - ui::s(8)) as f32, (row_h() - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+            }
+            if st.col_x[3] != st.col_x[4] {
+                let sz = if it.is_dir { String::new() } else { format_bytes(it.size) };
+                g.text_in(&sz, (st.col_x[3] + ui::s(2)) as f32, ry as f32, (st.col_x[4] - st.col_x[3] - ui::s(10)) as f32, (row_h() - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Far, Align::Center, false);
+            }
         }
 
         // barra de estado
@@ -411,7 +438,7 @@ fn row_at(st: &State, x: i32, y: i32) -> i32 {
     if !in_rect(&st.list_rc, x, y) {
         return -1;
     }
-    let r = st.scroll + (y - st.list_rc.top) / ROW_H;
+    let r = st.scroll + (y - st.list_rc.top) / row_h();
     if (r as usize) < st.items.len() { r } else { -1 }
 }
 
@@ -453,6 +480,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     macro_rules! st {
         () => { &mut *st_ptr };
     }
+    // Cambio de configuración: relee, recalcula tema/fuentes y vuelve a medir.
+    if msg == ui::config_changed_msg() {
+        ui::reload_config();
+        window::refresh_frame(hwnd);
+        if !st_ptr.is_null() {
+            let st = st!();
+            rebuild(st);
+            layout(st);
+        }
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+        return 0;
+    }
     match msg {
         WM_NCCALCSIZE if wp != 0 => {
             if IsZoomed(hwnd) != 0 {
@@ -483,7 +522,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 if l { return HTLEFT as LRESULT; }
                 if r { return HTRIGHT as LRESULT; }
             }
-            if pt.y < ui::s(CAPTION) {
+            if pt.y < ui::caption_h() {
                 if !st_ptr.is_null() && hit(&*st_ptr, pt.x, pt.y) != B_NONE {
                     return HTCLIENT as LRESULT;
                 }
@@ -688,17 +727,23 @@ pub fn run() -> i32 {
         });
         let raw = Box::into_raw(st);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize);
-        window::apply_frame_opaque(hwnd, theme::current().dark);
+        window::refresh_frame(hwnd);
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         layout(&mut *raw);
         navigate(&mut *raw, &start, false);
         layout(&mut *raw);
         ShowWindow(hwnd, SW_SHOWNORMAL);
+        // El explorador es interactivo: no se marca como EcoQoS, pero sí
+        // respeta el ajuste de liberación de memoria.
         ui::set_process_eco(false);
-        ui::trim_working_set();
+        if config::current().b(Id::LiberarMemoria) {
+            ui::trim_working_set();
+        }
 
         let code = window::message_loop();
         ui::shutdown();
         code
     }
 }
+
+

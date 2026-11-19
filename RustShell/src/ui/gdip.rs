@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use windows_sys::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::GdiPlus::*;
 
+use super::config;
 use super::theme::Color;
 use super::{s, sf, wide};
 
@@ -51,22 +52,50 @@ pub enum Align {
 // (alineación horizontal, vertical).
 thread_local! {
     static FONTS: RefCell<HashMap<(u32, bool, bool), *mut GpFont>> = RefCell::new(HashMap::new());
-    static UI_FAMILY: RefCell<*mut GpFontFamily> = RefCell::new(std::ptr::null_mut());
-    static ICON_FAMILY: RefCell<*mut GpFontFamily> = RefCell::new(std::ptr::null_mut());
+    static FAMILIES: RefCell<HashMap<&'static str, *mut GpFontFamily>> = RefCell::new(HashMap::new());
     static FORMATS: RefCell<HashMap<(u8, u8), *mut GpStringFormat>> = RefCell::new(HashMap::new());
 }
 
-fn make_family(cell: &'static std::thread::LocalKey<RefCell<*mut GpFontFamily>>, name: &str) -> *mut GpFontFamily {
-    cell.with(|f| {
-        let mut p = f.borrow_mut();
-        if p.is_null() {
-            let n = wide(name);
-            let mut fam: *mut GpFontFamily = std::ptr::null_mut();
-            unsafe { GdipCreateFontFamilyFromName(n.as_ptr(), std::ptr::null_mut(), &mut fam) };
-            *p = fam;
+/// Familia tipográfica (cacheada por nombre). Si el nombre no existe en el
+/// sistema, GDI+ deja el puntero nulo y usa la fuente genérica.
+fn make_family(name: &'static str) -> *mut GpFontFamily {
+    FAMILIES.with(|c| {
+        let mut map = c.borrow_mut();
+        if let Some(&f) = map.get(name) {
+            return f;
         }
-        *p
+        let n = wide(name);
+        let mut fam: *mut GpFontFamily = std::ptr::null_mut();
+        unsafe { GdipCreateFontFamilyFromName(n.as_ptr(), std::ptr::null_mut(), &mut fam) };
+        if fam.is_null() {
+            // Reserva: la fuente de interfaz clásica.
+            let n = wide("Segoe UI");
+            unsafe { GdipCreateFontFamilyFromName(n.as_ptr(), std::ptr::null_mut(), &mut fam) };
+        }
+        map.insert(name, fam);
+        fam
     })
+}
+
+/// Vacía la caché de fuentes y formatos. Hay que llamarla cuando cambian la
+/// fuente, la escala de texto o el DPI.
+pub fn invalidate_cache() {
+    FONTS.with(|c| {
+        let mut map = c.borrow_mut();
+        for (_, f) in map.drain() {
+            if !f.is_null() {
+                unsafe { GdipDeleteFont(f) };
+            }
+        }
+    });
+    FAMILIES.with(|c| {
+        let mut map = c.borrow_mut();
+        for (_, f) in map.drain() {
+            if !f.is_null() {
+                unsafe { GdipDeleteFontFamily(f) };
+            }
+        }
+    });
 }
 
 fn format(h: Align, v: Align) -> *mut GpStringFormat {
@@ -92,18 +121,20 @@ fn format(h: Align, v: Align) -> *mut GpStringFormat {
 /// Devuelve (y cachea) una fuente al tamaño lógico dado (96 DPI).
 /// `icon` usa Segoe MDL2 Assets (glifos de la interfaz).
 fn font(size_pt: f32, bold: bool, icon: bool) -> *mut GpFont {
-    let px = sf(size_pt);
+    // Los glifos de icono no siguen la escala de texto (son parte del dibujo).
+    let px = if icon { sf(size_pt) } else { sf(size_pt) * config::font_pct() as f32 / 100.0 };
     let key = ((px * 4.0) as u32, bold, icon);
     FONTS.with(|c| {
         let mut map = c.borrow_mut();
         if let Some(&f) = map.get(&key) {
             return f;
         }
-        let fam = if icon {
-            make_family(&ICON_FAMILY, "Segoe MDL2 Assets")
+        let name = if icon {
+            "Segoe MDL2 Assets"
         } else {
-            make_family(&UI_FAMILY, "Segoe UI")
+            config::FONTS[(config::font_index() as usize).min(config::FONTS.len() - 1)]
         };
+        let fam = make_family(name);
         let mut f: *mut GpFont = std::ptr::null_mut();
         let style = if bold { 1 } else { 0 };
         unsafe { GdipCreateFont(fam, px, style, 2 /*UnitPixel*/, &mut f) };
@@ -137,6 +168,16 @@ impl Gfx {
         self.g
     }
 
+    /// Limita el dibujo a un rectángulo (para áreas con desplazamiento).
+    pub fn set_clip(&self, x: i32, y: i32, w: i32, h: i32) {
+        unsafe { GdipSetClipRectI(self.g, x, y, w, h, 0 /*CombineModeReplace*/) };
+    }
+
+    /// Quita la limitación anterior.
+    pub fn reset_clip(&self) {
+        unsafe { GdipResetClip(self.g) };
+    }
+
     pub fn clear(&self, c: Color) {
         unsafe { GdipGraphicsClear(self.g, argb_u32(c)) };
     }
@@ -147,6 +188,54 @@ impl Gfx {
             GdipCreateSolidFill(argb_u32(c), &mut br);
             GdipFillRectangleI(self.g, br as *mut GpBrush, x, y, w, h);
             GdipDeleteBrush(br as *mut GpBrush);
+        }
+    }
+
+    /// Polígono relleno (área bajo una gráfica).
+    pub fn fill_poly(&self, pts: &[(f32, f32)], c: Color) {
+        if pts.len() < 3 {
+            return;
+        }
+        let pf: Vec<PointF> = pts.iter().map(|&(x, y)| PointF { X: x, Y: y }).collect();
+        unsafe {
+            let mut br: *mut GpSolidFill = std::ptr::null_mut();
+            GdipCreateSolidFill(argb_u32(c), &mut br);
+            GdipFillPolygon(self.g, br as *mut GpBrush, pf.as_ptr(), pf.len() as i32, 0 /*FillModeAlternate*/);
+            GdipDeleteBrush(br as *mut GpBrush);
+        }
+    }
+
+    /// Polilínea (la curva de una gráfica).
+    pub fn draw_lines(&self, pts: &[(f32, f32)], c: Color, width: f32) {
+        if pts.len() < 2 {
+            return;
+        }
+        let pf: Vec<PointF> = pts.iter().map(|&(x, y)| PointF { X: x, Y: y }).collect();
+        unsafe {
+            let mut pen: *mut GpPen = std::ptr::null_mut();
+            GdipCreatePen1(argb_u32(c), width, 2 /*UnitPixel*/, &mut pen);
+            GdipSetPenLineJoin(pen, 2 /*LineJoinRound*/);
+            GdipDrawLines(self.g, pen, pf.as_ptr(), pf.len() as i32);
+            GdipDeletePen(pen);
+        }
+    }
+
+    /// Dibuja un HICON del shell (iconos de los accesos directos) al tamaño dado.
+    /// GDI+ no sabe pintar iconos: se pide el HDC prestado y se usa DrawIconEx.
+    pub fn draw_hicon(&self, icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON, x: i32, y: i32, size: i32) {
+        if icon.is_null() {
+            return;
+        }
+        unsafe {
+            let mut hdc: HDC = std::ptr::null_mut();
+            if GdipGetDC(self.g, &mut hdc) != 0 || hdc.is_null() {
+                return;
+            }
+            windows_sys::Win32::UI::WindowsAndMessaging::DrawIconEx(
+                hdc, x, y, icon, size, size, 0, std::ptr::null_mut(),
+                windows_sys::Win32::UI::WindowsAndMessaging::DI_NORMAL,
+            );
+            GdipReleaseDC(self.g, hdc);
         }
     }
 
@@ -235,8 +324,12 @@ impl Gfx {
     }
 
     /// Rectángulo redondeado con relleno y/o borde opcionales.
+    /// El radio recibido es el del diseño base (10 px de referencia); se
+    /// multiplica por el factor del ajuste «Radio de las esquinas», de modo que
+    /// toda la interfaz respeta la preferencia con un solo punto de control.
     pub fn rounded(&self, x: f32, y: f32, w: f32, h: f32, radius: f32,
                    fill: Option<Color>, border: Option<(Color, f32)>) {
+        let radius = radius * config::radius_factor();
         unsafe {
             let path = self.rounded_path(x, y, w, h, radius);
             if let Some(c) = fill {
@@ -307,8 +400,9 @@ pub struct Chrome {
 }
 
 pub fn chrome_rects(w: i32) -> Chrome {
-    let title_h = s(42);
-    let bw = s(46);
+    let cfg = config::current();
+    let title_h = s(cfg.get(config::Id::AltoTitulo));
+    let bw = s(cfg.get(config::Id::AnchoBotonTitulo));
     Chrome {
         close: (w - bw, 0, bw, title_h),
         max: (w - bw * 2, 0, bw, title_h),

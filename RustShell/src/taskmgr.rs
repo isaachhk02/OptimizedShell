@@ -27,6 +27,7 @@ use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::ui::gdip::{Align, Chrome, Gfx};
+use crate::ui::config::{self, Id};
 use crate::ui::{self, theme, window};
 use crate::startup;
 
@@ -163,8 +164,6 @@ struct State {
     cpu_total: f64,
 }
 
-const CAPTION: i32 = 42;
-const ROW_H: i32 = 28;
 
 fn empty_rect() -> RECT {
     RECT { left: 0, top: 0, right: 0, bottom: 0 }
@@ -302,7 +301,7 @@ fn rebuild_view(st: &mut State) {
 }
 
 fn visible_rows(st: &State) -> i32 {
-    (((st.content.bottom - st.content.top) - ui::s(30)) / ROW_H).max(1)
+    (((st.content.bottom - st.content.top) - ui::s(30)) / row_h()).max(1)
 }
 
 // ---------------------------------------------------------------- layout
@@ -366,7 +365,12 @@ fn layout(st: &mut State) {
 
 #[allow(non_snake_case)]
 fn CAPTION_S() -> i32 {
-    ui::s(CAPTION)
+    ui::caption_h()
+}
+
+/// Alto de fila de las tablas (configurable en Configuración · Listas).
+fn row_h() -> i32 {
+    ui::s(config::current().get(Id::ListaAltoFila))
 }
 
 // ---------------------------------------------------------------- pintado
@@ -537,10 +541,10 @@ fn paint_table(g: &Gfx, s: &theme::Style, st: &State) {
             break;
         }
         let p = &st.procs[st.view[idx]];
-        let ry = body_top + row * ROW_H;
+        let ry = body_top + row * row_h();
         let rr_x = st.content.left + ui::s(2);
         let rr_w = body_right - rr_x;
-        let rr_h = ROW_H - ui::s(2);
+        let rr_h = row_h() - ui::s(2);
         if p.pid == st.sel_pid {
             g.rounded(rr_x as f32, ry as f32, rr_w as f32, rr_h as f32, ui::sf(5.0), Some(s.row_selected), None);
         } else if row == st.hover_row {
@@ -586,11 +590,11 @@ fn paint_startup(g: &Gfx, s: &theme::Style, st: &State) {
             break;
         }
         let e = &st.startup_items[idx];
-        let ry = body_top + row * ROW_H;
+        let ry = body_top + row * row_h();
         let rr_x = st.content.left + ui::s(2);
         let rr_w = st.content.right - ui::s(10) - rr_x;
         if idx as isize == st.startup_sel {
-            g.rounded(rr_x as f32, ry as f32, rr_w as f32, (ROW_H - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_selected), None);
+            g.rounded(rr_x as f32, ry as f32, rr_w as f32, (row_h() - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_selected), None);
         }
         let vals = [
             e.name.clone(),
@@ -601,7 +605,7 @@ fn paint_startup(g: &Gfx, s: &theme::Style, st: &State) {
         for (c, v) in vals.iter().enumerate() {
             let color = if c == 1 { if e.enabled { s.success } else { s.text_faint } } else if c == 0 { s.text } else { s.text_dim };
             g.text_in(v, (hx[c] + ui::s(2)) as f32, ry as f32, (hx[c + 1] - hx[c] - ui::s(10)) as f32,
-                      (ROW_H - ui::s(2)) as f32, 11.5, false, color, Align::Near, Align::Center, false);
+                      (row_h() - ui::s(2)) as f32, 11.5, false, color, Align::Near, Align::Center, false);
         }
     }
     if st.startup_items.is_empty() {
@@ -679,7 +683,7 @@ fn row_at(st: &State, x: i32, y: i32) -> i32 {
     if x < st.content.left || x >= st.content.right || y < body_top || y >= st.content.bottom {
         return -1;
     }
-    let r = st.scroll + (y - body_top) / ROW_H;
+    let r = st.scroll + (y - body_top) / row_h();
     if r < row_count(st) { r } else { -1 }
 }
 
@@ -740,6 +744,17 @@ fn switch_tab(st: &mut State, t: Tab) {
 // ---------------------------------------------------------------- wndproc
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let st_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State;
+    // Cambio de configuración: relee tema, fuentes, alto de fila e intervalo.
+    if msg == ui::config_changed_msg() {
+        let c = ui::reload_config();
+        window::refresh_frame(hwnd);
+        SetTimer(hwnd, 1, c.get(Id::TaskmgrRefresco) as u32, None);
+        if !st_ptr.is_null() {
+            layout(&mut *st_ptr);
+        }
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+        return 0;
+    }
     match msg {
         WM_NCCALCSIZE => {
             if wp != 0 {
@@ -1016,19 +1031,22 @@ pub fn run() -> i32 {
         let st_raw = Box::into_raw(st);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, st_raw as isize);
 
-        window::apply_frame_opaque(hwnd, theme::current().dark);
+        window::refresh_frame(hwnd);
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         layout(&mut *st_raw);
         snapshot(&mut *st_raw); // primer muestreo (sin %CPU)
         snapshot(&mut *st_raw); // segundo para tener %CPU inmediato no es posible aún; se llenará en el timer
         ShowWindow(hwnd, SW_SHOWNORMAL);
-        SetTimer(hwnd, 1, 1000, None);
+        SetTimer(hwnd, 1, config::current().get(Id::TaskmgrRefresco) as u32, None);
         ui::set_process_eco(false);
-        ui::trim_working_set();
+        if config::current().b(Id::LiberarMemoria) {
+            ui::trim_working_set();
+        }
 
         let code = window::message_loop();
         ui::shutdown();
         code
     }
 }
+

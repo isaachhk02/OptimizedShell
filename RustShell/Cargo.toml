@@ -33,6 +33,8 @@ windows-sys = { version = "0.60", features = [
     "Win32_UI_Shell_Common",
     "Win32_Storage_FileSystem",
 ] }
+# PDH (contadores de GPU y temperatura) y DXGI (nombre y VRAM de los adaptadores)
+# se usan con FFI propia en src/perf.rs: no hacen falta más features.
 
 [build-dependencies]
 embed-manifest = "1.4"

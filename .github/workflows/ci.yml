@@ -1,0 +1,63 @@
+name: CI
+
+# Compila y prueba OptimizedShell en cada cambio.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Compilar y probar (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: RustShell
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar toolchain de Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup target add x86_64-pc-windows-msvc
+          rustup default stable
+          rustup component add clippy
+
+      - name: Caché de cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            RustShell/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('RustShell/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Formato y avisos
+        run: cargo clippy --all-targets -- -D warnings
+        continue-on-error: true
+
+      - name: Pruebas
+        run: cargo test --target x86_64-pc-windows-msvc
+
+      - name: Compilar en release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Tamaño del binario
+        run: |
+          $exe = 'target\x86_64-pc-windows-msvc\release\OptimizedShell.exe'
+          '{0:N0} bytes' -f (Get-Item $exe).Length
+
+      - name: Publicar el binario como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: OptimizedShell-${{ github.sha }}
+          path: RustShell/target/x86_64-pc-windows-msvc/release/OptimizedShell.exe
+          if-no-files-found: error

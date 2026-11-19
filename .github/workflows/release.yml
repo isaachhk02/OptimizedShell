@@ -1,0 +1,98 @@
+name: Release
+
+# Publica una versión: compila el binario y crea la release de GitHub con el
+# .exe y su SHA-256. Se dispara al empujar una etiqueta vX.Y.Z, o a mano desde
+# la pestaña Actions indicando la etiqueta.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Etiqueta a publicar (p. ej. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Compilar y publicar
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determinar la etiqueta
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$($tag.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Instalar toolchain de Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup target add x86_64-pc-windows-msvc
+          rustup default stable
+
+      - name: Pruebas
+        working-directory: RustShell
+        run: cargo test --target x86_64-pc-windows-msvc
+
+      - name: Compilar en release
+        working-directory: RustShell
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Preparar los archivos de la release
+        id: pack
+        shell: pwsh
+        run: |
+          $exe = 'RustShell\target\x86_64-pc-windows-msvc\release\OptimizedShell.exe'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $exe dist\OptimizedShell.exe
+          Copy-Item README.md dist\README.md
+          $hash = (Get-FileHash dist\OptimizedShell.exe -Algorithm SHA256).Hash
+          $size = '{0:N0}' -f (Get-Item dist\OptimizedShell.exe).Length
+          "$hash  OptimizedShell.exe" | Out-File dist\OptimizedShell.exe.sha256 -Encoding ascii
+          Compress-Archive -Path dist\OptimizedShell.exe, dist\README.md -DestinationPath "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip"
+          "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Crear la release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Here-string literal: nada de lo que hay dentro lo interpreta
+          # PowerShell; las expresiones ${{ }} las sustituye GitHub antes.
+          $notes = @'
+          Shell y utilidades ligeras para Windows 10/11 en Rust sobre Win32 + GDI+.
+
+          **Un solo ejecutable** (`OptimizedShell.exe`, ${{ steps.pack.outputs.size }} bytes), sin dependencias ni VC++ redist:
+
+          | Modo | Comando |
+          |---|---|
+          | Barra de tareas (shell) | `OptimizedShell.exe` |
+          | Administrador de tareas | `--taskmgr` |
+          | Explorador de archivos | `--explorer [ruta]` |
+          | Bloqueo / inicio de sesión | `--lock` · `--logon` |
+          | Configuración | `--settings [pagina]` |
+          | Instalar / desinstalar como shell | `--install` · `--uninstall` |
+
+          La interfaz es configurable desde `--settings` (tema, barra de tareas, menú Inicio, listas y rendimiento); los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini`.
+
+          SHA-256 de `OptimizedShell.exe`:
+          `${{ steps.pack.outputs.hash }}`
+          '@
+          $notes | Out-File notes.md -Encoding utf8
+          gh release create "${{ steps.tag.outputs.tag }}" `
+            "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip" `
+            "dist\OptimizedShell.exe" `
+            "dist\OptimizedShell.exe.sha256" `
+            --title "OptimizedShell ${{ steps.tag.outputs.tag }}" `
+            --notes-file notes.md
