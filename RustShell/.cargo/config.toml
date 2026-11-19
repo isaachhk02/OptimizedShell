@@ -1,0 +1,6 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+# CRT estática (equivale a /MT): sin dependencia del VC++ redist.
+rustflags = ["-C", "target-feature=+crt-static"]
