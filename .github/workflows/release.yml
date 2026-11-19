@@ -73,8 +73,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Here-string literal: nada de lo que hay dentro lo interpreta
-          # PowerShell; las expresiones ${{ }} las sustituye GitHub antes.
+          # Here-string literal: PowerShell no interpreta nada de lo que hay
+          # dentro; las expresiones de GitHub ya vienen sustituidas.
           $notes = @'
           Shell y utilidades ligeras para Windows 10/11 en Rust sobre Win32 + GDI+.
 
