@@ -29,8 +29,13 @@ jobs:
       - name: Determinar la etiqueta
         id: tag
         shell: pwsh
+        # La etiqueta llega por variable de entorno: el contexto `inputs` no
+        # existe cuando el disparador es un push, y referenciarlo tumbaría el
+        # flujo antes de empezar.
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "version=$($tag.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
