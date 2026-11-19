@@ -1,0 +1,47 @@
+[package]
+name = "optimized-shell"
+version = "0.1.0"
+edition = "2021"
+description = "OptimizedShell: shell ligero para Windows (port a Rust, mínimo consumo)"
+build = "build.rs"
+
+[[bin]]
+name = "OptimizedShell"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_Environment",
+    "Win32_Security",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Time",
+    "Win32_System_Shutdown",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_Storage_FileSystem",
+] }
+
+[build-dependencies]
+embed-manifest = "1.4"
+
+# Perfil optimizado para el menor tamaño de binario y uso de memoria posible.
+[profile.release]
+opt-level = "z"       # optimiza para tamaño (menos páginas de código que cargar)
+lto = true            # link-time optimization (equivale a /GL + /LTCG)
+codegen-units = 1     # mejor optimización entre unidades
+panic = "abort"       # sin maquinaria de unwinding -> binario más pequeño
+strip = true          # quita símbolos
+overflow-checks = false
