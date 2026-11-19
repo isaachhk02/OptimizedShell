@@ -78,6 +78,16 @@ struct Proc {
     cpu: f32,
 }
 
+#[derive(Clone)]
+struct Service {
+    name: String,
+    display: String,
+    pid: u32,
+    running: bool,
+}
+
+const HIST_LEN: usize = 60;
+
 // ---- pestañas y botones ----
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -108,6 +118,7 @@ const STARTUP_COLS: [Col; 4] = [
 fn columns(tab: Tab) -> &'static [Col] {
     match tab {
         Tab::Startup => &STARTUP_COLS,
+        Tab::Services => &SVC_COLS,
         _ => &PROC_COLS,
     }
 }
@@ -156,6 +167,14 @@ struct State {
     // Inicio
     startup_items: Vec<startup::Entry>,
     startup_sel: isize,
+    // Rendimiento (historial autom. muestreado)
+    cpu_hist: Vec<f32>,
+    mem_hist: Vec<f32>,
+    perf_sel: usize, // 0 CPU, 1 Memoria
+    perf_rc: [RECT; 2],
+    // Servicios
+    services: Vec<Service>,
+    svc_sel: isize,
     // resumen
     mem_used: u64,
     mem_total: u64,
@@ -259,7 +278,20 @@ fn snapshot(st: &mut State) {
         }
     }
 
+    // historial para la pestaña Rendimiento
+    if st.prev_tick != 0 {
+        push_hist(&mut st.cpu_hist, st.cpu_total as f32);
+        push_hist(&mut st.mem_hist, st.mem_load as f32);
+    }
+
     rebuild_view(st);
+}
+
+fn push_hist(h: &mut Vec<f32>, v: f32) {
+    h.push(v);
+    if h.len() > HIST_LEN {
+        h.remove(0);
+    }
 }
 
 fn cell(p: &Proc, c: usize) -> String {
@@ -345,6 +377,16 @@ fn layout(st: &mut State) {
     }
     // contenido
     st.content = RECT { left: ui::s(8), top: y + bh + ui::s(10), right: w - ui::s(8), bottom: h - ui::s(8) };
+
+    // Rendimiento: dos tarjetas (CPU/Memoria) en la columna izquierda
+    for i in 0..2 {
+        st.perf_rc[i] = RECT {
+            left: st.content.left + ui::s(4),
+            top: st.content.top + ui::s(4) + i as i32 * ui::s(72),
+            right: st.content.left + ui::s(250) - ui::s(4),
+            bottom: st.content.top + ui::s(4) + i as i32 * ui::s(72) + ui::s(66),
+        };
+    }
 
     // columnas de la tabla (según la pestaña)
     let cols = columns(st.tab);
@@ -458,13 +500,8 @@ fn paint(st: &State) {
         match st.tab {
             Tab::Proc => paint_table(g, &s, st),
             Tab::Startup => paint_startup(g, &s, st),
-            _ => {
-                g.text_in(
-                    "Esta pestaña se añadirá en una próxima iteración del port a Rust.",
-                    st.content.left as f32, (st.content.top + ui::s(20)) as f32,
-                    (st.content.right - st.content.left) as f32, ui::s(28) as f32,
-                    13.0, false, s.text_faint, Align::Center, Align::Center, false);
-            }
+            Tab::Services => paint_services(g, &s, st),
+            Tab::Perf => paint_performance(g, &s, st),
         }
     });
 }
@@ -628,6 +665,146 @@ fn toggle_startup(st: &mut State) {
     }
 }
 
+// ---------------------------------------------------------------- Servicios
+fn load_services(st: &mut State) {
+    use windows_sys::Win32::System::Services::*;
+    unsafe {
+        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_ENUMERATE_SERVICE);
+        if scm.is_null() {
+            return;
+        }
+        let mut needed = 0u32;
+        let mut count = 0u32;
+        let mut resume = 0u32;
+        // primera llamada para dimensionar
+        EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_STATE_ALL,
+                              std::ptr::null_mut(), 0, &mut needed, &mut count, &mut resume, std::ptr::null());
+        if needed == 0 {
+            CloseServiceHandle(scm);
+            return;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        count = 0;
+        resume = 0;
+        let ok = EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_STATE_ALL,
+                                       buf.as_mut_ptr(), buf.len() as u32, &mut needed, &mut count, &mut resume, std::ptr::null());
+        let mut out = Vec::new();
+        if ok != 0 {
+            let arr = buf.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW;
+            for i in 0..count as usize {
+                let e = &*arr.add(i);
+                let name = wstr_ptr(e.lpServiceName);
+                let display = wstr_ptr(e.lpDisplayName);
+                out.push(Service {
+                    name,
+                    display,
+                    pid: e.ServiceStatusProcess.dwProcessId,
+                    running: e.ServiceStatusProcess.dwCurrentState == SERVICE_RUNNING,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase()));
+        st.services = out;
+        CloseServiceHandle(scm);
+    }
+    if st.svc_sel >= st.services.len() as isize {
+        st.svc_sel = -1;
+    }
+}
+
+unsafe fn wstr_ptr(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let mut len = 0;
+    while *p.add(len) != 0 {
+        len += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+}
+
+const SVC_COLS: [Col; 4] = [
+    Col { title: "Nombre", width: 260, right: false },
+    Col { title: "PID", width: 80, right: true },
+    Col { title: "Estado", width: 120, right: false },
+    Col { title: "Descripción", width: 0, right: false },
+];
+
+fn paint_services(g: &Gfx, s: &theme::Style, st: &State) {
+    let hx = &st.col_x;
+    let header_top = st.content.top;
+    let header_h = ui::s(30);
+    for (i, c) in SVC_COLS.iter().enumerate() {
+        g.text_in(c.title, (hx[i] + ui::s(2)) as f32, header_top as f32, (hx[i + 1] - hx[i] - ui::s(10)) as f32,
+                  header_h as f32, 11.5, true, s.text_dim, if c.right { Align::Far } else { Align::Near }, Align::Center, false);
+    }
+    g.hline(st.content.left, st.content.right, header_top + header_h - 1, s.separator);
+    let body_top = header_top + header_h;
+    let vis = visible_rows(st);
+    for row in 0..vis {
+        let idx = (st.scroll + row) as usize;
+        if idx >= st.services.len() {
+            break;
+        }
+        let sv = &st.services[idx];
+        let ry = body_top + row * ROW_H;
+        if idx as isize == st.svc_sel {
+            g.rounded((st.content.left + ui::s(2)) as f32, ry as f32, (st.content.right - ui::s(10) - st.content.left) as f32,
+                      (ROW_H - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_selected), None);
+        }
+        g.text_in(&sv.display, (hx[0] + ui::s(2)) as f32, ry as f32, (hx[1] - hx[0] - ui::s(10)) as f32, (ROW_H - ui::s(2)) as f32, 11.5, false, s.text, Align::Near, Align::Center, false);
+        let pid = if sv.pid != 0 { sv.pid.to_string() } else { String::new() };
+        g.text_in(&pid, (hx[1] + ui::s(2)) as f32, ry as f32, (hx[2] - hx[1] - ui::s(10)) as f32, (ROW_H - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Far, Align::Center, false);
+        let (txt, col) = if sv.running { ("En ejecución", s.success) } else { ("Detenido", s.text_faint) };
+        g.text_in(txt, (hx[2] + ui::s(2)) as f32, ry as f32, (hx[3] - hx[2] - ui::s(10)) as f32, (ROW_H - ui::s(2)) as f32, 11.5, false, col, Align::Near, Align::Center, false);
+        g.text_in(&sv.name, (hx[3] + ui::s(2)) as f32, ry as f32, (hx[4] - hx[3] - ui::s(10)) as f32, (ROW_H - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+    }
+}
+
+// ---------------------------------------------------------------- Rendimiento
+fn paint_performance(g: &Gfx, s: &theme::Style, st: &State) {
+    // lista izquierda: CPU / Memoria
+    let items = [("CPU", st.cpu_hist.last().copied().unwrap_or(0.0), "%"),
+                 ("Memoria", st.mem_hist.last().copied().unwrap_or(0.0), "%")];
+    for (i, r) in st.perf_rc.iter().enumerate() {
+        if i == st.perf_sel {
+            g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32, ui::sf(8.0), Some(s.row_selected), None);
+        }
+        g.rounded(r.left as f32, r.top as f32, ui::s(3) as f32, (r.bottom - r.top) as f32, ui::sf(1.5), Some(s.accent), None);
+        g.text_in(items[i].0, (r.left + ui::s(14)) as f32, (r.top + ui::s(10)) as f32, (r.right - r.left - ui::s(20)) as f32, ui::s(22) as f32, 13.0, true, s.text, Align::Near, Align::Near, false);
+        g.text_in(&format!("{:.0} {}", items[i].1, items[i].2), (r.left + ui::s(14)) as f32, (r.top + ui::s(34)) as f32, (r.right - r.left - ui::s(20)) as f32, ui::s(20) as f32, 12.0, false, s.text_dim, Align::Near, Align::Near, false);
+    }
+    // detalle: gráfica del elemento seleccionado
+    let hist = if st.perf_sel == 0 { &st.cpu_hist } else { &st.mem_hist };
+    let dx = st.content.left + ui::s(250) + ui::s(16);
+    let dy = st.content.top + ui::s(40);
+    let dw = st.content.right - dx;
+    let dh = st.content.bottom - dy - ui::s(10);
+    let label = if st.perf_sel == 0 { "Uso de CPU" } else { "Uso de memoria" };
+    g.text_in(&format!("{}   {:.0} %", label, hist.last().copied().unwrap_or(0.0)),
+              dx as f32, (st.content.top) as f32, dw as f32, ui::s(32) as f32, 16.0, true, s.text, Align::Near, Align::Center, false);
+    // marco + rejilla
+    g.rounded(dx as f32, dy as f32, dw as f32, dh as f32, ui::sf(8.0), Some(s.graph_bg), Some((s.card_border, 1.0)));
+    for i in 1..4 {
+        let gy = dy + dh * i / 4;
+        g.hline(dx + 1, dx + dw - 1, gy, s.grid_line);
+    }
+    // línea del historial
+    if hist.len() >= 2 {
+        let n = hist.len();
+        let col = if st.perf_sel == 0 { s.accent } else { s.success };
+        let step = dw as f32 / (HIST_LEN - 1) as f32;
+        let x0 = dx as f32 + (HIST_LEN - n) as f32 * step;
+        for i in 1..n {
+            let x1 = x0 + (i - 1) as f32 * step;
+            let x2 = x0 + i as f32 * step;
+            let y1 = dy as f32 + dh as f32 * (1.0 - (hist[i - 1] / 100.0).clamp(0.0, 1.0));
+            let y2 = dy as f32 + dh as f32 * (1.0 - (hist[i] / 100.0).clamp(0.0, 1.0));
+            g.line(x1, y1, x2, y2, col, ui::sf(1.6));
+        }
+    }
+}
+
 // ---------------------------------------------------------------- interacción
 fn hit_test_btn(st: &State, x: i32, y: i32) -> i32 {
     let mut rc = empty_rect();
@@ -670,6 +847,7 @@ fn hit_test_btn(st: &State, x: i32, y: i32) -> i32 {
 fn row_count(st: &State) -> i32 {
     match st.tab {
         Tab::Startup => st.startup_items.len() as i32,
+        Tab::Services => st.services.len() as i32,
         _ => st.view.len() as i32,
     }
 }
@@ -733,6 +911,8 @@ fn switch_tab(st: &mut State, t: Tab) {
     st.scroll = 0;
     if t == Tab::Startup {
         load_startup(st);
+    } else if t == Tab::Services {
+        load_services(st);
     }
     layout(st);
 }
@@ -878,6 +1058,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         st.startup_sel = r as isize;
                         InvalidateRect(hwnd, std::ptr::null(), 0);
                     }
+                } else if st.tab == Tab::Services {
+                    let r = row_at(st, x, y);
+                    if r >= 0 {
+                        st.svc_sel = r as isize;
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                } else if st.tab == Tab::Perf {
+                    for i in 0..2 {
+                        if in_rect(&st.perf_rc[i], x, y) {
+                            st.perf_sel = i;
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                            break;
+                        }
+                    }
                 }
             }
             0
@@ -983,10 +1177,19 @@ pub fn run() -> i32 {
             return 1;
         }
 
+        // pestaña inicial: --tab procesos|rendimiento|inicio|servicios
+        let tab_arg = crate::args::value("--tab").or_else(crate::args::positional);
+        let initial = match tab_arg.as_deref() {
+            Some("rendimiento") => Tab::Perf,
+            Some("inicio") => Tab::Startup,
+            Some("servicios") => Tab::Services,
+            _ => Tab::Proc,
+        };
+
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
         let st = Box::new(State {
             hwnd,
-            tab: Tab::Proc,
+            tab: initial,
             procs: Vec::new(),
             view: Vec::new(),
             prev_cpu: HashMap::new(),
@@ -1008,6 +1211,12 @@ pub fn run() -> i32 {
             col_x: Vec::new(),
             startup_items: Vec::new(),
             startup_sel: -1,
+            cpu_hist: Vec::new(),
+            mem_hist: Vec::new(),
+            perf_sel: 0,
+            perf_rc: [empty_rect(); 2],
+            services: Vec::new(),
+            svc_sel: -1,
             mem_used: 0,
             mem_total: 0,
             mem_load: 0,
@@ -1019,6 +1228,11 @@ pub fn run() -> i32 {
         window::apply_frame_opaque(hwnd, theme::current().dark);
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        match initial {
+            Tab::Startup => load_startup(&mut *st_raw),
+            Tab::Services => load_services(&mut *st_raw),
+            _ => {}
+        }
         layout(&mut *st_raw);
         snapshot(&mut *st_raw); // primer muestreo (sin %CPU)
         snapshot(&mut *st_raw); // segundo para tener %CPU inmediato no es posible aún; se llenará en el timer

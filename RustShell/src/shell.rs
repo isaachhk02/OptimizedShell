@@ -20,10 +20,60 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABE_BOTTOM, APPBARDATA, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::ui::gdip::{Align, Gfx};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
+
+use crate::ui::gdip::{Align, Gfx, Image};
 use crate::ui::{self, theme, window};
 
 const BAR_H: i32 = 48;
+
+// Modificadores de hotkey.
+const MOD_CONTROL: HOT_KEY_MODIFIERS = 0x0002;
+const MOD_SHIFT: HOT_KEY_MODIFIERS = 0x0004;
+const MOD_WIN: HOT_KEY_MODIFIERS = 0x0008;
+// Identificadores de hotkey.
+const HK_EXPLORER: i32 = 1;
+const HK_RUN: i32 = 2;
+const HK_TASKMGR: i32 = 3;
+
+thread_local! {
+    static WALLPAPER: RefCell<Option<Image>> = RefCell::new(None);
+}
+
+fn load_wallpaper() {
+    let mut buf = [0u16; 520];
+    let path = unsafe {
+        if windows_sys::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+            windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETDESKWALLPAPER,
+            buf.len() as u32, buf.as_mut_ptr() as *mut _, 0) != 0 {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(0);
+            String::from_utf16_lossy(&buf[..end])
+        } else {
+            String::new()
+        }
+    };
+    if !path.is_empty() {
+        WALLPAPER.with(|w| *w.borrow_mut() = Image::load(&path));
+    }
+}
+
+unsafe extern "system" fn desktop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            window::paint_buffered(hwnd, |g: &Gfx, w, h| {
+                g.clear(theme::rgbc(12, 14, 20));
+                WALLPAPER.with(|wp| {
+                    if let Some(img) = wp.borrow().as_ref() {
+                        g.draw_image_cover(img, 0, 0, w, h);
+                    }
+                });
+            });
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
 
 struct AppBtn {
     hwnd: HWND,
@@ -305,6 +355,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_HOTKEY => {
+            match wp as i32 {
+                HK_EXPLORER => launch_own("--explorer"),
+                HK_RUN => menu_action(3),
+                HK_TASKMGR => launch_own("--taskmgr"),
+                _ => {}
+            }
+            0
+        }
         WM_DESTROY => {
             // libera la reserva del área de trabajo
             let mut abd: APPBARDATA = std::mem::zeroed();
@@ -402,6 +461,30 @@ pub fn run() -> i32 {
             hinst,
             std::ptr::null(),
         );
+
+        // ventana de escritorio con el fondo, al fondo del z-order
+        let desk_class = ui::wide("OShellRustDesktop");
+        let wcd = WNDCLASSW { lpfnWndProc: Some(desktop_proc), lpszClassName: desk_class.as_ptr(), hInstance: hinst,
+            style: CS_HREDRAW | CS_VREDRAW, cbClsExtra: 0, cbWndExtra: 0, hIcon: std::ptr::null_mut(),
+            hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: std::ptr::null_mut(), lpszMenuName: std::ptr::null() };
+        RegisterClassW(&wcd);
+        load_wallpaper();
+        let desktop = CreateWindowExW(
+            WS_EX_NOACTIVATE,
+            desk_class.as_ptr(),
+            ui::wide("Escritorio").as_ptr(),
+            WS_POPUP,
+            0, 0, sw, sh - bar_h,
+            std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null(),
+        );
+        if !desktop.is_null() {
+            SetWindowPos(desktop, HWND_BOTTOM, 0, 0, sw, sh - bar_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+
+        // hotkeys globales
+        RegisterHotKey(hwnd, HK_EXPLORER, MOD_WIN, b'E' as u32);
+        RegisterHotKey(hwnd, HK_RUN, MOD_WIN, b'R' as u32);
+        RegisterHotKey(hwnd, HK_TASKMGR, MOD_CONTROL | MOD_SHIFT, 0x1B); // Ctrl+Shift+Esc
 
         // reserva el área de trabajo (la barra queda siempre visible)
         let mut abd: APPBARDATA = std::mem::zeroed();

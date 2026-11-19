@@ -35,6 +35,7 @@ const H_WINACCENT: i32 = 32;
 const H_BLUR: i32 = 33;
 const H_RESET: i32 = 36;
 const H_SWATCH0: i32 = 100; // + índice de acento
+const H_ROW0: i32 = 200; // + índice de fila (Pantalla/Fondo)
 
 struct State {
     hwnd: HWND,
@@ -42,6 +43,12 @@ struct State {
     hover: i32,
     drag_opacity: i32, // 0 ninguno, 1 barra, 2 ventanas
     live_opacity: i32,
+    // Pantalla
+    modes: Vec<(u32, u32, u32)>, // ancho, alto, Hz
+    cur_mode: isize,
+    // Fondo
+    walls: Vec<String>,
+    cur_wall: String,
     // layout
     x0: i32,
     cw: i32,
@@ -97,6 +104,113 @@ fn layout(st: &mut State) {
     st.reset_rc = rect(st.x0 + st.cw - ui::s(150), h - ui::s(50), ui::s(150), ui::s(34));
 }
 
+// ---------------------------------------------------------------- Pantalla
+fn load_display(st: &mut State) {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+    unsafe {
+        let mut seen: Vec<(u32, u32, u32)> = Vec::new();
+        let mut dm: DEVMODEW = std::mem::zeroed();
+        dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        let mut i = 0u32;
+        while EnumDisplaySettingsW(std::ptr::null(), i, &mut dm) != 0 {
+            if dm.dmBitsPerPel >= 32 {
+                let m = (dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency);
+                if !seen.contains(&m) {
+                    seen.push(m);
+                }
+            }
+            i += 1;
+        }
+        seen.sort_by(|a, b| (b.0, b.1, b.2).cmp(&(a.0, a.1, a.2)));
+        st.modes = seen;
+        // actual
+        let mut cur: DEVMODEW = std::mem::zeroed();
+        cur.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        st.cur_mode = -1;
+        if EnumDisplaySettingsW(std::ptr::null(), ENUM_CURRENT_SETTINGS, &mut cur) != 0 {
+            let m = (cur.dmPelsWidth, cur.dmPelsHeight, cur.dmDisplayFrequency);
+            st.cur_mode = st.modes.iter().position(|x| *x == m).map(|p| p as isize).unwrap_or(-1);
+        }
+    }
+}
+
+fn apply_mode(st: &State, i: usize) {
+    use windows_sys::Win32::Graphics::Gdi::{ChangeDisplaySettingsW, DEVMODEW, CDS_UPDATEREGISTRY,
+        DM_PELSWIDTH, DM_PELSHEIGHT, DM_DISPLAYFREQUENCY};
+    if let Some(&(w, h, hz)) = st.modes.get(i) {
+        unsafe {
+            let mut dm: DEVMODEW = std::mem::zeroed();
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            dm.dmPelsWidth = w;
+            dm.dmPelsHeight = h;
+            dm.dmDisplayFrequency = hz;
+            dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+            ChangeDisplaySettingsW(&dm, CDS_UPDATEREGISTRY);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Fondo
+fn load_wallpapers(st: &mut State) {
+    let mut walls = Vec::new();
+    let dirs = [
+        std::env::var("WINDIR").map(|w| format!("{}\\Web\\Wallpaper", w)).unwrap_or_default(),
+        std::env::var("WINDIR").map(|w| format!("{}\\Web\\4K\\Wallpaper\\Windows", w)).unwrap_or_default(),
+        std::env::var("USERPROFILE").map(|u| format!("{}\\Pictures", u)).unwrap_or_default(),
+    ];
+    for d in dirs {
+        if d.is_empty() {
+            continue;
+        }
+        collect_images(std::path::Path::new(&d), &mut walls, 2);
+    }
+    walls.truncate(60);
+    st.walls = walls;
+    // actual
+    let mut buf = [0u16; 520];
+    unsafe {
+        if SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, buf.as_mut_ptr() as *mut _, 0) != 0 {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(0);
+            st.cur_wall = String::from_utf16_lossy(&buf[..end]);
+        }
+    }
+}
+
+fn collect_images(dir: &std::path::Path, out: &mut Vec<String>, depth: u32) {
+    if out.len() >= 60 {
+        return;
+    }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth > 0 {
+                collect_images(&p, out, depth - 1);
+            }
+        } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+            let ext = ext.to_lowercase();
+            if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "bmp") {
+                out.push(p.to_string_lossy().to_string());
+            }
+        }
+    }
+}
+
+fn set_wallpaper(path: &str) {
+    let w = ui::wide(path);
+    unsafe {
+        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, w.as_ptr() as *mut _, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    }
+}
+
+// Rectángulo de la fila i del listado de una página (Pantalla/Fondo).
+fn page_row(st: &State, i: usize) -> RECT {
+    rect(st.x0, ui::s(110) + i as i32 * ui::s(40), st.cw, ui::s(36))
+}
+
 // ---------------------------------------------------------------- tema
 fn apply(t: theme::ThemeSettings) {
     theme::save(&t);
@@ -143,12 +257,64 @@ fn paint(st: &State) {
 
         match st.page {
             0 => paint_theme(g, &s, st, h),
+            1 => paint_wallpaper(g, &s, st),
+            2 => paint_display(g, &s, st),
             _ => {
-                g.text_in("Esta sección se añadirá en una próxima iteración del port a Rust.",
+                g.text_in("La sección de Bluetooth (WinRT) se añadirá en una próxima iteración.",
                           st.x0 as f32, ui::s(140) as f32, st.cw as f32, ui::s(28) as f32, 13.0, false, s.text_faint, Align::Near, Align::Center, false);
             }
         }
     });
+}
+
+fn paint_display(g: &Gfx, s: &theme::Style, st: &State) {
+    section_title(g, s, st, "Resolución de pantalla", ui::s(84));
+    for (i, &(w, h, hz)) in st.modes.iter().enumerate() {
+        let r = page_row(st, i);
+        if r.top > st.x0 + ui::s(560) {
+            break;
+        }
+        let sel = i as isize == st.cur_mode;
+        let hov = st.hover == H_ROW0 + i as i32;
+        if sel || hov {
+            g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32, ui::sf(6.0),
+                      Some(if sel { s.row_selected } else { s.row_hover }), None);
+        }
+        g.text_in(&format!("{} × {}", w, h), (r.left + ui::s(12)) as f32, r.top as f32, ui::s(200) as f32, (r.bottom - r.top) as f32, 13.0, false, s.text, Align::Near, Align::Center, false);
+        g.text_in(&format!("{} Hz", hz), (r.left + ui::s(220)) as f32, r.top as f32, ui::s(120) as f32, (r.bottom - r.top) as f32, 12.0, false, s.text_dim, Align::Near, Align::Center, false);
+        if sel {
+            g.text_in("Actual", (r.right - ui::s(90)) as f32, r.top as f32, ui::s(80) as f32, (r.bottom - r.top) as f32, 11.5, false, s.accent, Align::Far, Align::Center, false);
+        }
+    }
+    if st.modes.is_empty() {
+        g.text_in("No se pudieron enumerar los modos de pantalla.", st.x0 as f32, ui::s(140) as f32, st.cw as f32, ui::s(28) as f32, 13.0, false, s.text_faint, Align::Near, Align::Center, false);
+    }
+}
+
+fn paint_wallpaper(g: &Gfx, s: &theme::Style, st: &State) {
+    section_title(g, s, st, "Imagen de fondo", ui::s(84));
+    if !st.cur_wall.is_empty() {
+        let name = st.cur_wall.rsplit(['\\', '/']).next().unwrap_or("");
+        g.text_in(&format!("Actual: {}", name), st.x0 as f32, ui::s(84) as f32, st.cw as f32, ui::s(22) as f32, 11.5, false, s.text_dim, Align::Far, Align::Center, false);
+    }
+    for (i, path) in st.walls.iter().enumerate() {
+        let r = page_row(st, i);
+        if r.top > st.x0 + ui::s(560) {
+            break;
+        }
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        let sel = path.eq_ignore_ascii_case(&st.cur_wall);
+        let hov = st.hover == H_ROW0 + i as i32;
+        if sel || hov {
+            g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32, ui::sf(6.0),
+                      Some(if sel { s.row_selected } else { s.row_hover }), None);
+        }
+        g.text_in("\u{E91B}", (r.left + ui::s(10)) as f32, r.top as f32, ui::s(22) as f32, (r.bottom - r.top) as f32, 12.0, false, s.accent, Align::Center, Align::Center, true);
+        g.text_in(name, (r.left + ui::s(38)) as f32, r.top as f32, (r.right - r.left - ui::s(44)) as f32, (r.bottom - r.top) as f32, 12.5, false, s.text, Align::Near, Align::Center, false);
+    }
+    if st.walls.is_empty() {
+        g.text_in("No se encontraron imágenes en Imágenes ni en Windows\\Web.", st.x0 as f32, ui::s(140) as f32, st.cw as f32, ui::s(28) as f32, 13.0, false, s.text_faint, Align::Near, Align::Center, false);
+    }
 }
 
 fn section_title(g: &Gfx, s: &theme::Style, st: &State, t: &str, y: i32) {
@@ -290,7 +456,25 @@ fn hit(st: &State, x: i32, y: i32) -> i32 {
             return H_RESET;
         }
     }
+    if st.page == 1 || st.page == 2 {
+        let n = if st.page == 1 { st.walls.len() } else { st.modes.len() };
+        for i in 0..n {
+            if in_rect(&page_row(st, i), x, y) {
+                return H_ROW0 + i as i32;
+            }
+        }
+    }
     H_NONE
+}
+
+fn enter_page(st: &mut State, p: usize) {
+    st.page = p;
+    st.hover = H_NONE;
+    if p == 1 {
+        load_wallpapers(st);
+    } else if p == 2 {
+        load_display(st);
+    }
 }
 
 fn near_track(track: &RECT, x: i32, y: i32) -> bool {
@@ -309,8 +493,20 @@ fn click(st: &mut State, x: i32, y: i32) {
         H_CLOSE => unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0); },
         H_MIN => unsafe { ShowWindow(hwnd, SW_MINIMIZE); },
         _ if h >= H_NAV0 && h < H_NAV0 + 4 => {
-            st.page = (h - H_NAV0) as usize;
-            st.hover = H_NONE;
+            enter_page(st, (h - H_NAV0) as usize);
+            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        }
+        _ if h >= H_ROW0 => {
+            let i = (h - H_ROW0) as usize;
+            if st.page == 2 {
+                apply_mode(st, i);
+                load_display(st);
+            } else if st.page == 1 {
+                if let Some(p) = st.walls.get(i).cloned() {
+                    set_wallpaper(&p);
+                    st.cur_wall = p;
+                }
+            }
             unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
         }
         H_DARK | H_LIGHT => {
@@ -520,6 +716,10 @@ pub fn run() -> i32 {
             hover: H_NONE,
             drag_opacity: 0,
             live_opacity: 0,
+            modes: Vec::new(),
+            cur_mode: -1,
+            walls: Vec::new(),
+            cur_wall: String::new(),
             x0: 0,
             cw: 0,
             nav: [er(); 4],
@@ -539,6 +739,9 @@ pub fn run() -> i32 {
         window::apply_frame_opaque(hwnd, theme::current().dark);
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         layout(&mut *raw);
+        if page != 0 {
+            enter_page(&mut *raw, page);
+        }
         ShowWindow(hwnd, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd);
         ui::set_process_eco(true);

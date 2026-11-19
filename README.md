@@ -45,25 +45,27 @@ El binario queda en `RustShell\target\x86_64-pc-windows-msvc\release\OptimizedSh
 Port en curso desde la versión original en C++ (sustituida por esta implementación en
 Rust). Ya funcionan, con interfaz equivalente a la original:
 
-- **Administrador de tareas**: marco propio (barra de título, min/max/cerrar), pestañas,
-  tabla de procesos con %CPU por delta y colores por umbral, filtrado, fin de proceso y
-  pestaña Inicio (habilitar/deshabilitar con las claves StartupApproved de Windows).
-- **Configuración**: página de Personalización completa (modo claro/oscuro, acentos,
-  desenfoque y opacidades) que guarda en `%APPDATA%\OptimizedShell\theme.ini` y se aplica
-  al momento.
+- **Administrador de tareas**: marco propio (barra de título, min/max/cerrar) y las cuatro
+  pestañas: **Procesos** (tabla con %CPU por delta, colores por umbral, filtrado, fin de
+  proceso), **Rendimiento** (gráficas de CPU y memoria muestreadas), **Inicio**
+  (habilitar/deshabilitar con las claves StartupApproved de Windows) y **Servicios**
+  (listado del SCM con estado y PID). Pestaña inicial por `--tab`.
+- **Configuración**: **Personalización** completa (modo, acentos, desenfoque, opacidades,
+  guardado en `theme.ini` y aplicado al momento), **Pantalla** (enumerar y aplicar
+  resolución/frecuencia) y **Fondo de escritorio** (elegir imagen de Windows\Web o
+  Imágenes y aplicarla).
 - **Explorador**: navegación (atrás/adelante/arriba), panel lateral de accesos, columnas
-  Nombre/Fecha/Tipo/Tamaño ordenables y apertura de archivos.
+  ordenables, apertura de archivos, **nueva carpeta** y **eliminar** a la papelera.
 - **Bloqueo**: reloj, tarjeta de usuario y autenticación con `LogonUserW`.
-- **Shell**: barra de tareas con botón Inicio, botones de ventanas abiertas y reloj;
+- **Shell**: barra de tareas con botón Inicio y menú, botones de ventanas abiertas y
+  reloj; **fondo de escritorio**, **hotkeys globales** (Win+E, Win+R, Ctrl+Shift+Esc);
   `--install`/`--uninstall` sobre el valor `Shell` de Winlogon.
 
 ### Pendiente
 
-- Task Manager: gráficas de Rendimiento (PDH), pestaña Servicios, iconos por fila,
-  EcoQoS/prioridad/afinidad por proceso.
-- Configuración: páginas Fondo (galería de miniaturas), Pantalla (DisplayConfig/WMI) y
-  Bluetooth (WinRT).
-- Explorador: operaciones COM (`IFileOperation`), portapapeles, arrastrar y soltar,
-  refresco por `ReadDirectoryChangesW`, menú contextual del shell.
-- Shell: escritorio con fondo, menú Inicio con búsqueda de apps, bandeja del sistema,
-  flyouts de volumen/Wi‑Fi/batería, hotkeys globales.
+- Task Manager: iconos por fila, menú contextual por proceso (EcoQoS/prioridad/afinidad).
+- Configuración: página Bluetooth (WinRT).
+- Explorador: portapapeles y arrastrar y soltar (`IFileOperation`), refresco por
+  `ReadDirectoryChangesW`, menú contextual del shell.
+- Shell: menú Inicio con búsqueda de apps, bandeja del sistema y flyouts de
+  volumen/Wi‑Fi/batería.
