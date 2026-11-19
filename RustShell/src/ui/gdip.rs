@@ -294,6 +294,56 @@ impl Drop for Gfx {
     }
 }
 
+/// Imagen GDI+ cargada desde archivo (RAII).
+pub struct Image {
+    img: *mut GpImage,
+}
+
+impl Image {
+    pub fn load(path: &str) -> Option<Image> {
+        let w = wide(path);
+        let mut img: *mut GpImage = std::ptr::null_mut();
+        let st = unsafe { GdipLoadImageFromFile(w.as_ptr(), &mut img) };
+        if st == 0 && !img.is_null() {
+            Some(Image { img })
+        } else {
+            None
+        }
+    }
+    pub fn size(&self) -> (f32, f32) {
+        unsafe {
+            let mut w = 0.0f32;
+            let mut h = 0.0f32;
+            GdipGetImageDimension(self.img, &mut w, &mut h);
+            (w, h)
+        }
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        if !self.img.is_null() {
+            unsafe { GdipDisposeImage(self.img) };
+        }
+    }
+}
+
+impl Gfx {
+    /// Dibuja una imagen cubriendo el rectángulo (recortando para mantener relación).
+    pub fn draw_image_cover(&self, img: &Image, x: i32, y: i32, w: i32, h: i32) {
+        let (iw, ih) = img.size();
+        if iw <= 0.0 || ih <= 0.0 {
+            return;
+        }
+        let scale = (w as f32 / iw).max(h as f32 / ih);
+        let (dw, dh) = (iw * scale, ih * scale);
+        let (dx, dy) = (x as f32 + (w as f32 - dw) / 2.0, y as f32 + (h as f32 - dh) / 2.0);
+        unsafe {
+            GdipDrawImageRect(self.g, img.img, dx, dy, dw, dh);
+        }
+    }
+}
+
 // ------------------------------------------------------------ chrome / controles
 // Port de style::ChromeRects / DrawChrome / DrawToolButton de ui.h.
 

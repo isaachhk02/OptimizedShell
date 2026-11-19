@@ -17,13 +17,67 @@ use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Shutdown::{ExitWindowsEx, EWX_REBOOT, EWX_SHUTDOWN, SHTDN_REASON_FLAG_PLANNED};
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-use windows_sys::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABE_BOTTOM, APPBARDATA, ShellExecuteW};
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Storage::FileSystem::{FindFirstFileW, FindNextFileW, FindClose, WIN32_FIND_DATAW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN};
+use windows_sys::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABE_BOTTOM, APPBARDATA, ShellExecuteW, SHGetFolderPathW, SHGetKnownFolderItem, FOLDERID_AppsFolder, BHID_EnumItems, KF_FLAG_DEFAULT, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING};
+use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
+use windows_sys::core::GUID;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::ui::gdip::{Align, Gfx};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
+
+use crate::ui::gdip::{Align, Gfx, Image};
 use crate::ui::{self, theme, window};
 
 const BAR_H: i32 = 48;
+
+// Modificadores de hotkey.
+const MOD_CONTROL: HOT_KEY_MODIFIERS = 0x0002;
+const MOD_SHIFT: HOT_KEY_MODIFIERS = 0x0004;
+const MOD_WIN: HOT_KEY_MODIFIERS = 0x0008;
+// Identificadores de hotkey.
+const HK_EXPLORER: i32 = 1;
+const HK_RUN: i32 = 2;
+const HK_TASKMGR: i32 = 3;
+
+thread_local! {
+    static WALLPAPER: RefCell<Option<Image>> = RefCell::new(None);
+}
+
+fn load_wallpaper() {
+    let mut buf = [0u16; 520];
+    let path = unsafe {
+        if windows_sys::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+            windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETDESKWALLPAPER,
+            buf.len() as u32, buf.as_mut_ptr() as *mut _, 0) != 0 {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(0);
+            String::from_utf16_lossy(&buf[..end])
+        } else {
+            String::new()
+        }
+    };
+    if !path.is_empty() {
+        WALLPAPER.with(|w| *w.borrow_mut() = Image::load(&path));
+    }
+}
+
+unsafe extern "system" fn desktop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            window::paint_buffered(hwnd, |g: &Gfx, w, h| {
+                g.clear(theme::rgbc(12, 14, 20));
+                WALLPAPER.with(|wp| {
+                    if let Some(img) = wp.borrow().as_ref() {
+                        g.draw_image_cover(img, 0, 0, w, h);
+                    }
+                });
+            });
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
 
 struct AppBtn {
     hwnd: HWND,
@@ -147,8 +201,221 @@ const MENU_ITEMS: [(&str, &str); 7] = [
     ("\u{E7E8}", "Apagar"),
 ];
 
+// Alto de cada fila del menú y margen superior.
+const MENU_W: i32 = 320;
+const MENU_ITEM_H: i32 = 36;
+const MENU_PAD: i32 = 8;
+
+// Una entrada del menú Inicio: una acción del sistema, un separador o una app.
+enum Entry {
+    Action { glyph: &'static str, label: &'static str, action: usize },
+    Sep(&'static str),
+    App { name: String, path: String },
+}
+
 thread_local! {
     static MENU_HOVER: RefCell<isize> = RefCell::new(-1);
+    static MENU_ENTRIES: RefCell<Vec<Entry>> = RefCell::new(Vec::new());
+    static MENU_SCROLL: RefCell<i32> = RefCell::new(0);
+}
+
+// Carpetas conocidas del menú Inicio (usuario + común).
+const CSIDL_PROGRAMS: i32 = 0x0002;
+const CSIDL_COMMON_PROGRAMS: i32 = 0x0017;
+
+fn known_folder(csidl: i32) -> Option<String> {
+    let mut buf = [0u16; 260];
+    unsafe {
+        if SHGetFolderPathW(std::ptr::null_mut(), csidl, std::ptr::null_mut(), 0, buf.as_mut_ptr()) == 0 {
+            let p = from_utf16(&buf);
+            if !p.is_empty() { return Some(p); }
+        }
+    }
+    None
+}
+
+fn scan_dir(dir: &str, out: &mut Vec<(String, String)>, depth: u32) {
+    if depth > 5 {
+        return;
+    }
+    let pattern = format!("{}\\*", dir);
+    let mut fd: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    let h = unsafe { FindFirstFileW(ui::wide(&pattern).as_ptr(), &mut fd) };
+    if h == INVALID_HANDLE_VALUE {
+        return;
+    }
+    loop {
+        let name = from_utf16(&fd.cFileName);
+        if name != "." && name != ".." && (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) == 0 {
+            let full = format!("{}\\{}", dir, name);
+            if fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                scan_dir(&full, out, depth + 1);
+            } else {
+                let lower = name.to_ascii_lowercase();
+                if lower.ends_with(".lnk") || lower.ends_with(".url") {
+                    // la extensión es ASCII de 4 bytes, el corte es seguro
+                    let disp = name[..name.len() - 4].to_string();
+                    out.push((disp, full));
+                }
+            }
+        }
+        if unsafe { FindNextFileW(h, &mut fd) } == 0 {
+            break;
+        }
+    }
+    unsafe { FindClose(h) };
+}
+
+// --------------------------- enumeración de shell:AppsFolder (apps Store + escritorio)
+// windows-sys no define las interfaces COM, solo funciones/constantes, así que se
+// declaran aquí las vtablas mínimas que se necesitan.
+type PFN = unsafe extern "system" fn();
+
+#[repr(C)]
+struct IUnknownVtbl {
+    query_interface: unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32,
+    add_ref: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+}
+
+#[repr(C)]
+struct IShellItemVtbl {
+    base: IUnknownVtbl,
+    bind_to_handler: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *const GUID, *const GUID, *mut *mut core::ffi::c_void) -> i32,
+    get_parent: PFN,
+    get_display_name: unsafe extern "system" fn(*mut core::ffi::c_void, i32, *mut *mut u16) -> i32,
+    get_attributes: PFN,
+    compare: PFN,
+}
+
+#[repr(C)]
+struct IEnumShellItemsVtbl {
+    base: IUnknownVtbl,
+    next: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut *mut core::ffi::c_void, *mut u32) -> i32,
+    skip: PFN,
+    reset: PFN,
+    clone: PFN,
+}
+
+// IID_IShellItem {43826D1E-E718-42EE-BC55-A1E261C37BFE}
+const IID_ISHELLITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+// IID_IEnumShellItems {70629033-E363-4A28-A567-0DB78006E6D7}
+const IID_IENUMSHELLITEMS: GUID = GUID::from_u128(0x70629033_e363_4a28_a567_0db78006e6d7);
+
+unsafe fn vtbl<'a, T>(p: *mut core::ffi::c_void) -> &'a T {
+    &**(p as *const *const T)
+}
+
+fn from_pwstr(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+    }
+}
+
+// Enumera FOLDERID_AppsFolder: apps de la Store (UWP) y de escritorio en una sola
+// lista. Devuelve (nombre visible, destino de lanzamiento "shell:AppsFolder\\<parse>").
+fn enum_apps_folder() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    unsafe {
+        let mut folder: *mut core::ffi::c_void = std::ptr::null_mut();
+        if SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, std::ptr::null_mut(),
+                                &IID_ISHELLITEM, &mut folder) != 0 || folder.is_null() {
+            return out;
+        }
+        let fv: &IShellItemVtbl = vtbl(folder);
+        let mut en: *mut core::ffi::c_void = std::ptr::null_mut();
+        let hr = (fv.bind_to_handler)(folder, std::ptr::null_mut(), &BHID_EnumItems, &IID_IENUMSHELLITEMS, &mut en);
+        if hr == 0 && !en.is_null() {
+            let ev: &IEnumShellItemsVtbl = vtbl(en);
+            loop {
+                let mut item: *mut core::ffi::c_void = std::ptr::null_mut();
+                let mut fetched: u32 = 0;
+                if (ev.next)(en, 1, &mut item, &mut fetched) != 0 || fetched == 0 || item.is_null() {
+                    break;
+                }
+                let iv: &IShellItemVtbl = vtbl(item);
+                let mut name_p: *mut u16 = std::ptr::null_mut();
+                let mut parse_p: *mut u16 = std::ptr::null_mut();
+                if (iv.get_display_name)(item, SIGDN_NORMALDISPLAY, &mut name_p) == 0
+                    && (iv.get_display_name)(item, SIGDN_PARENTRELATIVEPARSING, &mut parse_p) == 0
+                {
+                    let name = from_pwstr(name_p);
+                    let parse = from_pwstr(parse_p);
+                    let lower = name.to_lowercase();
+                    let skip = lower.starts_with("uninstall")
+                        || lower.starts_with("desinstalar")
+                        || parse.to_lowercase().starts_with("http")
+                        || name.is_empty();
+                    if !skip {
+                        out.push((name, format!("shell:AppsFolder\\{}", parse)));
+                    }
+                }
+                if !name_p.is_null() { CoTaskMemFree(name_p as *const _); }
+                if !parse_p.is_null() { CoTaskMemFree(parse_p as *const _); }
+                (iv.base.release)(item);
+            }
+            (ev.base.release)(en);
+        }
+        (fv.base.release)(folder);
+    }
+    out
+}
+
+// Busca las aplicaciones instaladas, ordenadas alfabéticamente y sin duplicados.
+// Prefiere shell:AppsFolder (incluye apps de la Store); si no hay ninguna, recurre
+// a escanear los accesos directos del menú Inicio.
+fn scan_apps() -> Vec<(String, String)> {
+    let mut out = enum_apps_folder();
+    if out.is_empty() {
+        for csidl in [CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS] {
+            if let Some(dir) = known_folder(csidl) {
+                scan_dir(&dir, &mut out, 0);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    out.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+    out
+}
+
+fn rebuild_entries() {
+    let mut v: Vec<Entry> = Vec::new();
+    for (i, (glyph, label)) in MENU_ITEMS.iter().enumerate() {
+        v.push(Entry::Action { glyph, label, action: i });
+    }
+    v.push(Entry::Sep("Aplicaciones"));
+    for (name, path) in scan_apps() {
+        v.push(Entry::App { name, path });
+    }
+    MENU_ENTRIES.with(|e| *e.borrow_mut() = v);
+    MENU_SCROLL.with(|s| *s.borrow_mut() = 0);
+}
+
+fn menu_content_h() -> i32 {
+    let n = MENU_ENTRIES.with(|e| e.borrow().len()) as i32;
+    MENU_PAD * 2 + n * ui::s(MENU_ITEM_H)
+}
+
+// Índice de la entrada bajo la coordenada vertical (en cliente), o -1.
+fn menu_hit(y: i32) -> isize {
+    let scroll = MENU_SCROLL.with(|s| *s.borrow());
+    let i = (y - ui::s(MENU_PAD) + scroll) / ui::s(MENU_ITEM_H);
+    let n = MENU_ENTRIES.with(|e| e.borrow().len()) as i32;
+    if i >= 0 && i < n { i as isize } else { -1 }
+}
+
+fn launch_path(path: &str) {
+    unsafe {
+        ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide(path).as_ptr(),
+                      std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+    }
 }
 
 fn own_exe() -> String {
@@ -185,37 +452,94 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     match msg {
         WM_ERASEBKGND => 1,
         WM_PAINT => {
-            let item_h = ui::s(40);
+            let item_h = ui::s(MENU_ITEM_H);
+            let pad = ui::s(MENU_PAD);
             window::paint_buffered(hwnd, |g: &Gfx, w, h| {
                 let s = theme::style();
                 g.clear(theme::argb(0, 0, 0, 0));
                 g.rounded(0.0, 0.0, w as f32, h as f32, ui::sf(10.0), Some(s.menu_bg), Some((s.menu_border, 1.0)));
                 let hov = MENU_HOVER.with(|m| *m.borrow());
-                for (i, (glyph, label)) in MENU_ITEMS.iter().enumerate() {
-                    let y = ui::s(8) + i as i32 * item_h;
-                    if hov == i as isize {
-                        g.rounded(ui::s(6) as f32, y as f32, (w - ui::s(12)) as f32, item_h as f32, ui::sf(6.0), Some(s.menu_hover), None);
+                let scroll = MENU_SCROLL.with(|m| *m.borrow());
+                MENU_ENTRIES.with(|e| {
+                    for (i, entry) in e.borrow().iter().enumerate() {
+                        let y = pad - scroll + i as i32 * item_h;
+                        if y + item_h <= pad || y >= h - pad {
+                            continue; // fuera de la zona visible
+                        }
+                        match entry {
+                            Entry::Sep(label) => {
+                                g.text_in(label, ui::s(16) as f32, y as f32, (w - ui::s(32)) as f32, item_h as f32, 10.5, false, s.text_dim, Align::Near, Align::Center, false);
+                            }
+                            Entry::Action { glyph, label, .. } => {
+                                if hov == i as isize {
+                                    g.rounded(ui::s(6) as f32, y as f32, (w - ui::s(12)) as f32, item_h as f32, ui::sf(6.0), Some(s.menu_hover), None);
+                                }
+                                g.text_in(glyph, ui::s(16) as f32, y as f32, ui::s(24) as f32, item_h as f32, 13.0, false, s.accent, Align::Center, Align::Center, true);
+                                g.text_in(label, ui::s(48) as f32, y as f32, (w - ui::s(56)) as f32, item_h as f32, 12.5, false, s.text, Align::Near, Align::Center, false);
+                            }
+                            Entry::App { name, .. } => {
+                                if hov == i as isize {
+                                    g.rounded(ui::s(6) as f32, y as f32, (w - ui::s(12)) as f32, item_h as f32, ui::sf(6.0), Some(s.menu_hover), None);
+                                }
+                                g.text_in("\u{E8B7}", ui::s(16) as f32, y as f32, ui::s(24) as f32, item_h as f32, 12.0, false, s.text_dim, Align::Center, Align::Center, true);
+                                g.text_in(name, ui::s(48) as f32, y as f32, (w - ui::s(56)) as f32, item_h as f32, 12.5, false, s.text, Align::Near, Align::Center, false);
+                            }
+                        }
                     }
-                    g.text_in(glyph, ui::s(16) as f32, y as f32, ui::s(24) as f32, item_h as f32, 13.0, false, s.accent, Align::Center, Align::Center, true);
-                    g.text_in(label, ui::s(48) as f32, y as f32, (w - ui::s(56)) as f32, item_h as f32, 13.0, false, s.text, Align::Near, Align::Center, false);
-                }
+                });
             });
             0
         }
         WM_MOUSEMOVE => {
             let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-            let i = (y - ui::s(8)) / ui::s(40);
-            let v = if i >= 0 && (i as usize) < MENU_ITEMS.len() { i as isize } else { -1 };
-            MENU_HOVER.with(|m| *m.borrow_mut() = v);
+            let v = match menu_hit(y) {
+                i if i >= 0 => {
+                    // los separadores no se resaltan
+                    let is_sep = MENU_ENTRIES.with(|e| matches!(e.borrow().get(i as usize), Some(Entry::Sep(_))));
+                    if is_sep { -1 } else { i }
+                }
+                _ => -1,
+            };
+            if MENU_HOVER.with(|m| m.replace(v)) != v {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wp >> 16) & 0xFFFF) as i16 as i32;
+            let mut rc = er();
+            GetClientRect(hwnd, &mut rc);
+            let max = (menu_content_h() - rc.bottom).max(0);
+            let step = ui::s(MENU_ITEM_H) * 3;
+            MENU_SCROLL.with(|m| {
+                let nv = (*m.borrow() - delta / 120 * step).clamp(0, max);
+                *m.borrow_mut() = nv;
+            });
+            MENU_HOVER.with(|m| *m.borrow_mut() = -1);
             InvalidateRect(hwnd, std::ptr::null(), 0);
             0
         }
         WM_LBUTTONDOWN => {
             let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-            let i = (y - ui::s(8)) / ui::s(40);
+            let hit = menu_hit(y);
+            if hit < 0 {
+                return 0;
+            }
+            // decide la acción sin mantener el préstamo del RefCell durante el lanzamiento
+            enum Act { None, Action(usize), Launch(String) }
+            let act = MENU_ENTRIES.with(|e| match e.borrow().get(hit as usize) {
+                Some(Entry::Action { action, .. }) => Act::Action(*action),
+                Some(Entry::App { path, .. }) => Act::Launch(path.clone()),
+                _ => Act::None,
+            });
+            if matches!(act, Act::None) {
+                return 0;
+            }
             ShowWindow(hwnd, SW_HIDE);
-            if i >= 0 && (i as usize) < MENU_ITEMS.len() {
-                menu_action(i as usize);
+            match act {
+                Act::Action(i) => menu_action(i),
+                Act::Launch(p) => launch_path(&p),
+                Act::None => {}
             }
             0
         }
@@ -235,14 +559,19 @@ fn toggle_menu(st: &State) {
             ShowWindow(st.menu, SW_HIDE);
             return;
         }
+        rebuild_entries();
+        MENU_HOVER.with(|m| *m.borrow_mut() = -1);
         let mut br = er();
         GetWindowRect(st.hwnd, &mut br);
-        let w = ui::s(300);
-        let h = ui::s(8) * 2 + MENU_ITEMS.len() as i32 * ui::s(40);
+        let w = ui::s(MENU_W);
+        // alto deseado por el contenido, limitado al espacio sobre la barra
+        let avail = (br.top - ui::s(16)).max(ui::s(200));
+        let h = menu_content_h().min(avail);
         let x = br.left + ui::s(8);
         let y = br.top - h - ui::s(8);
         SetWindowPos(st.menu, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
         SetForegroundWindow(st.menu);
+        InvalidateRect(st.menu, std::ptr::null(), 0);
     }
 }
 
@@ -305,6 +634,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_HOTKEY => {
+            match wp as i32 {
+                HK_EXPLORER => launch_own("--explorer"),
+                HK_RUN => menu_action(3),
+                HK_TASKMGR => launch_own("--taskmgr"),
+                _ => {}
+            }
+            0
+        }
         WM_DESTROY => {
             // libera la reserva del área de trabajo
             let mut abd: APPBARDATA = std::mem::zeroed();
@@ -351,6 +689,8 @@ pub fn install(enable: bool) -> i32 {
 pub fn run() -> i32 {
     unsafe {
         let hinst = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
+        // COM (STA) para enumerar shell:AppsFolder en el menú Inicio.
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
         ui::init(hinst);
 
         let class_name = ui::wide("OShellRustTaskbar");
@@ -402,6 +742,30 @@ pub fn run() -> i32 {
             hinst,
             std::ptr::null(),
         );
+
+        // ventana de escritorio con el fondo, al fondo del z-order
+        let desk_class = ui::wide("OShellRustDesktop");
+        let wcd = WNDCLASSW { lpfnWndProc: Some(desktop_proc), lpszClassName: desk_class.as_ptr(), hInstance: hinst,
+            style: CS_HREDRAW | CS_VREDRAW, cbClsExtra: 0, cbWndExtra: 0, hIcon: std::ptr::null_mut(),
+            hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: std::ptr::null_mut(), lpszMenuName: std::ptr::null() };
+        RegisterClassW(&wcd);
+        load_wallpaper();
+        let desktop = CreateWindowExW(
+            WS_EX_NOACTIVATE,
+            desk_class.as_ptr(),
+            ui::wide("Escritorio").as_ptr(),
+            WS_POPUP,
+            0, 0, sw, sh - bar_h,
+            std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null(),
+        );
+        if !desktop.is_null() {
+            SetWindowPos(desktop, HWND_BOTTOM, 0, 0, sw, sh - bar_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+
+        // hotkeys globales
+        RegisterHotKey(hwnd, HK_EXPLORER, MOD_WIN, b'E' as u32);
+        RegisterHotKey(hwnd, HK_RUN, MOD_WIN, b'R' as u32);
+        RegisterHotKey(hwnd, HK_TASKMGR, MOD_CONTROL | MOD_SHIFT, 0x1B); // Ctrl+Shift+Esc
 
         // reserva el área de trabajo (la barra queda siempre visible)
         let mut abd: APPBARDATA = std::mem::zeroed();

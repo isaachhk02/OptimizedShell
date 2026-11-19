@@ -37,6 +37,8 @@ const B_BACK: i32 = 10;
 const B_FWD: i32 = 11;
 const B_UP: i32 = 12;
 const B_REFRESH: i32 = 13;
+const B_NEWFOLDER: i32 = 14;
+const B_DELETE: i32 = 15;
 const B_NAV0: i32 = 100; // + índice de acceso
 
 struct FileItem {
@@ -70,6 +72,8 @@ struct State {
     places: Vec<Place>,
     // layout
     btn: [RECT; 4], // back/fwd/up/refresh
+    btn_newfolder: RECT,
+    btn_delete: RECT,
     chrome: Chrome,
     addr_rc: RECT,
     nav_rc: RECT,
@@ -251,7 +255,10 @@ fn layout(st: &mut State) {
         st.btn[i] = rect(ui::s(8) + i as i32 * (bs + ui::s(4)), y0, bs, bs);
     }
     let ax = st.btn[3].right + ui::s(8);
-    st.addr_rc = rect(ax, y0, w - ui::s(10) - ax, bs);
+    // botones de acción a la derecha
+    st.btn_delete = rect(w - ui::s(10) - ui::s(118), y0, ui::s(118), bs);
+    st.btn_newfolder = rect(st.btn_delete.left - ui::s(6) - ui::s(140), y0, ui::s(140), bs);
+    st.addr_rc = rect(ax, y0, st.btn_newfolder.left - ui::s(8) - ax, bs);
 
     let top = y0 + bs + ui::s(8);
     let status_h = ui::s(28);
@@ -301,6 +308,8 @@ fn paint(st: &State) {
         // barra de direcciones (ruta)
         g.rounded(st.addr_rc.left as f32, st.addr_rc.top as f32, (st.addr_rc.right - st.addr_rc.left) as f32, (st.addr_rc.bottom - st.addr_rc.top) as f32, ui::sf(6.0), Some(s.control_bg), Some((s.control_border, 1.0)));
         g.text_in(&st.path, (st.addr_rc.left + ui::s(12)) as f32, st.addr_rc.top as f32, (st.addr_rc.right - st.addr_rc.left - ui::s(20)) as f32, (st.addr_rc.bottom - st.addr_rc.top) as f32, 12.5, false, s.text, Align::Near, Align::Center, false);
+        action_btn(g, &s, st.btn_newfolder, "\u{E8F4}  Nueva carpeta", st.hover == B_NEWFOLDER, false);
+        action_btn(g, &s, st.btn_delete, "\u{E74D}  Eliminar", st.hover == B_DELETE, st.sel >= 0);
 
         // panel lateral
         g.fill_rect(st.nav_rc.left, st.nav_rc.top, st.nav_rc.right - st.nav_rc.left, st.nav_rc.bottom - st.nav_rc.top, s.nav_bg);
@@ -373,6 +382,13 @@ fn chrome_btn(g: &Gfx, s: &theme::Style, rc: (i32, i32, i32, i32), glyph: &str, 
     g.text_in(glyph, x as f32, y as f32, w as f32, h as f32, 10.0, false, col, Align::Center, Align::Center, true);
 }
 
+fn action_btn(g: &Gfx, s: &theme::Style, r: RECT, label: &str, hov: bool, enabled: bool) {
+    let fill = if hov && enabled { s.control_hover } else { s.control_bg };
+    let fg = if enabled { if hov { s.text } else { s.text_dim } } else { theme::with_alpha(s.text_faint, 140) };
+    g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32, ui::sf(6.0), Some(fill), Some((s.control_border, 1.0)));
+    g.text_in(label, r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32, 12.0, false, fg, Align::Center, Align::Center, false);
+}
+
 fn tool_btn(g: &Gfx, s: &theme::Style, r: RECT, glyph: &str, hov: bool, enabled: bool) {
     if hov && enabled {
         g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32, ui::sf(6.0), Some(s.control_hover), None);
@@ -398,6 +414,12 @@ fn hit(st: &State, x: i32, y: i32) -> i32 {
         if in_rect(&st.btn[i], x, y) {
             return B_BACK + i as i32;
         }
+    }
+    if in_rect(&st.btn_newfolder, x, y) {
+        return B_NEWFOLDER;
+    }
+    if in_rect(&st.btn_delete, x, y) {
+        return B_DELETE;
     }
     for (i, r) in st.nav_rects.iter().enumerate() {
         if in_rect(r, x, y) {
@@ -428,6 +450,45 @@ fn open_item(st: &mut State, idx: usize) {
                           std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
         }
     }
+}
+
+fn new_folder(st: &mut State) {
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+    let base = st.path.trim_end_matches('\\');
+    // nombre único
+    let mut name = "Nueva carpeta".to_string();
+    let mut n = 2;
+    while std::path::Path::new(&format!("{}\\{}", base, name)).exists() {
+        name = format!("Nueva carpeta ({})", n);
+        n += 1;
+    }
+    let full = format!("{}\\{}", base, name);
+    unsafe { CreateDirectoryW(ui::wide(&full).as_ptr(), std::ptr::null()); }
+    let p = st.path.clone();
+    navigate(st, &p, false);
+}
+
+fn delete_selected(st: &mut State) {
+    use windows_sys::Win32::UI::Shell::{SHFileOperationW, SHFILEOPSTRUCTW, FO_DELETE, FOF_ALLOWUNDO};
+    if st.sel < 0 {
+        return;
+    }
+    let it = &st.all[st.items[st.sel as usize]];
+    let full = format!("{}\\{}", st.path.trim_end_matches('\\'), it.name);
+    // pFrom requiere doble terminador nulo
+    let mut from: Vec<u16> = full.encode_utf16().collect();
+    from.push(0);
+    from.push(0);
+    unsafe {
+        let mut op: SHFILEOPSTRUCTW = std::mem::zeroed();
+        op.hwnd = st.hwnd;
+        op.wFunc = FO_DELETE as u32;
+        op.pFrom = from.as_ptr();
+        op.fFlags = FOF_ALLOWUNDO as u16; // a la papelera de reciclaje
+        SHFileOperationW(&mut op);
+    }
+    let p = st.path.clone();
+    navigate(st, &p, false);
 }
 
 fn go_back(st: &mut State) {
@@ -532,6 +593,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     B_FWD => { go_fwd(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
                     B_UP => { go_up(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
                     B_REFRESH => { let p = st.path.clone(); navigate(st, &p, false); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
+                    B_NEWFOLDER => { new_folder(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
+                    B_DELETE => { delete_selected(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
                     bn if bn >= B_NAV0 => {
                         let p = st.places[(bn - B_NAV0) as usize].path.clone();
                         navigate(st, &p, true);
@@ -598,6 +661,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 } else if vk == VK_RETURN as u32 && st.sel >= 0 {
                     open_item(st, st.sel as usize);
+                } else if vk == 0x2E && st.sel >= 0 {
+                    // Supr -> papelera
+                    delete_selected(st);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
             }
             0
@@ -677,6 +744,8 @@ pub fn run() -> i32 {
             fwd: Vec::new(),
             places: build_places(),
             btn: [er(); 4],
+            btn_newfolder: er(),
+            btn_delete: er(),
             chrome: ui::gdip::chrome_rects(w),
             addr_rc: er(),
             nav_rc: er(),
