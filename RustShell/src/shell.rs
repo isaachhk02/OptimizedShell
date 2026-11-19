@@ -19,7 +19,9 @@ use windows_sys::Win32::System::Shutdown::{ExitWindowsEx, EWX_REBOOT, EWX_SHUTDO
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Storage::FileSystem::{FindFirstFileW, FindNextFileW, FindClose, WIN32_FIND_DATAW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN};
-use windows_sys::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABE_BOTTOM, APPBARDATA, ShellExecuteW, SHGetFolderPathW};
+use windows_sys::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABE_BOTTOM, APPBARDATA, ShellExecuteW, SHGetFolderPathW, SHGetKnownFolderItem, FOLDERID_AppsFolder, BHID_EnumItems, KF_FLAG_DEFAULT, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING};
+use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
+use windows_sys::core::GUID;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
@@ -264,13 +266,118 @@ fn scan_dir(dir: &str, out: &mut Vec<(String, String)>, depth: u32) {
     unsafe { FindClose(h) };
 }
 
-// Busca las aplicaciones instaladas en los accesos directos del menú Inicio,
-// ordenadas alfabéticamente y sin duplicados por nombre.
-fn scan_apps() -> Vec<(String, String)> {
+// --------------------------- enumeración de shell:AppsFolder (apps Store + escritorio)
+// windows-sys no define las interfaces COM, solo funciones/constantes, así que se
+// declaran aquí las vtablas mínimas que se necesitan.
+type PFN = unsafe extern "system" fn();
+
+#[repr(C)]
+struct IUnknownVtbl {
+    query_interface: unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32,
+    add_ref: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+}
+
+#[repr(C)]
+struct IShellItemVtbl {
+    base: IUnknownVtbl,
+    bind_to_handler: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *const GUID, *const GUID, *mut *mut core::ffi::c_void) -> i32,
+    get_parent: PFN,
+    get_display_name: unsafe extern "system" fn(*mut core::ffi::c_void, i32, *mut *mut u16) -> i32,
+    get_attributes: PFN,
+    compare: PFN,
+}
+
+#[repr(C)]
+struct IEnumShellItemsVtbl {
+    base: IUnknownVtbl,
+    next: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut *mut core::ffi::c_void, *mut u32) -> i32,
+    skip: PFN,
+    reset: PFN,
+    clone: PFN,
+}
+
+// IID_IShellItem {43826D1E-E718-42EE-BC55-A1E261C37BFE}
+const IID_ISHELLITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+// IID_IEnumShellItems {70629033-E363-4A28-A567-0DB78006E6D7}
+const IID_IENUMSHELLITEMS: GUID = GUID::from_u128(0x70629033_e363_4a28_a567_0db78006e6d7);
+
+unsafe fn vtbl<'a, T>(p: *mut core::ffi::c_void) -> &'a T {
+    &**(p as *const *const T)
+}
+
+fn from_pwstr(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+    }
+}
+
+// Enumera FOLDERID_AppsFolder: apps de la Store (UWP) y de escritorio en una sola
+// lista. Devuelve (nombre visible, destino de lanzamiento "shell:AppsFolder\\<parse>").
+fn enum_apps_folder() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    for csidl in [CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS] {
-        if let Some(dir) = known_folder(csidl) {
-            scan_dir(&dir, &mut out, 0);
+    unsafe {
+        let mut folder: *mut core::ffi::c_void = std::ptr::null_mut();
+        if SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, std::ptr::null_mut(),
+                                &IID_ISHELLITEM, &mut folder) != 0 || folder.is_null() {
+            return out;
+        }
+        let fv: &IShellItemVtbl = vtbl(folder);
+        let mut en: *mut core::ffi::c_void = std::ptr::null_mut();
+        let hr = (fv.bind_to_handler)(folder, std::ptr::null_mut(), &BHID_EnumItems, &IID_IENUMSHELLITEMS, &mut en);
+        if hr == 0 && !en.is_null() {
+            let ev: &IEnumShellItemsVtbl = vtbl(en);
+            loop {
+                let mut item: *mut core::ffi::c_void = std::ptr::null_mut();
+                let mut fetched: u32 = 0;
+                if (ev.next)(en, 1, &mut item, &mut fetched) != 0 || fetched == 0 || item.is_null() {
+                    break;
+                }
+                let iv: &IShellItemVtbl = vtbl(item);
+                let mut name_p: *mut u16 = std::ptr::null_mut();
+                let mut parse_p: *mut u16 = std::ptr::null_mut();
+                if (iv.get_display_name)(item, SIGDN_NORMALDISPLAY, &mut name_p) == 0
+                    && (iv.get_display_name)(item, SIGDN_PARENTRELATIVEPARSING, &mut parse_p) == 0
+                {
+                    let name = from_pwstr(name_p);
+                    let parse = from_pwstr(parse_p);
+                    let lower = name.to_lowercase();
+                    let skip = lower.starts_with("uninstall")
+                        || lower.starts_with("desinstalar")
+                        || parse.to_lowercase().starts_with("http")
+                        || name.is_empty();
+                    if !skip {
+                        out.push((name, format!("shell:AppsFolder\\{}", parse)));
+                    }
+                }
+                if !name_p.is_null() { CoTaskMemFree(name_p as *const _); }
+                if !parse_p.is_null() { CoTaskMemFree(parse_p as *const _); }
+                (iv.base.release)(item);
+            }
+            (ev.base.release)(en);
+        }
+        (fv.base.release)(folder);
+    }
+    out
+}
+
+// Busca las aplicaciones instaladas, ordenadas alfabéticamente y sin duplicados.
+// Prefiere shell:AppsFolder (incluye apps de la Store); si no hay ninguna, recurre
+// a escanear los accesos directos del menú Inicio.
+fn scan_apps() -> Vec<(String, String)> {
+    let mut out = enum_apps_folder();
+    if out.is_empty() {
+        for csidl in [CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS] {
+            if let Some(dir) = known_folder(csidl) {
+                scan_dir(&dir, &mut out, 0);
+            }
         }
     }
     out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
@@ -582,6 +689,8 @@ pub fn install(enable: bool) -> i32 {
 pub fn run() -> i32 {
     unsafe {
         let hinst = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
+        // COM (STA) para enumerar shell:AppsFolder en el menú Inicio.
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
         ui::init(hinst);
 
         let class_name = ui::wide("OShellRustTaskbar");
