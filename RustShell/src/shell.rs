@@ -16,11 +16,11 @@ use std::cell::RefCell;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::System::Registry::*;
-use windows_sys::Win32::System::Shutdown::{ExitWindowsEx, EWX_REBOOT, EWX_SHUTDOWN, SHTDN_REASON_FLAG_PLANNED};
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABE_BOTTOM, ABE_TOP, APPBARDATA, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use crate::startmenu;
 use crate::ui::config::{self, Id};
 use crate::ui::gdip::{Align, Gfx};
 use crate::ui::{self, theme, window};
@@ -217,37 +217,9 @@ fn paint(st: &State) {
 }
 
 // ------------------------------------------------------------ menú Inicio
-/// Acciones posibles del menú, con el ajuste que decide si se muestran.
-const ALL_ITEMS: [(&str, &str, usize, Option<Id>); 7] = [
-    ("\u{E713}", "Configuración", 0, None),
-    ("\u{E8B7}", "Explorador de archivos", 1, None),
-    ("\u{E9D9}", "Administrador de tareas", 2, None),
-    ("\u{E756}", "Ejecutar...", 3, Some(Id::MenuEjecutar)),
-    ("\u{E72E}", "Bloquear", 4, Some(Id::MenuBloquear)),
-    ("\u{E777}", "Reiniciar", 5, Some(Id::MenuApagado)),
-    ("\u{E7E8}", "Apagar", 6, Some(Id::MenuApagado)),
-];
-
-/// Elementos visibles del menú según la configuración.
-fn menu_items() -> Vec<(&'static str, &'static str, usize)> {
-    let c = config::current();
-    ALL_ITEMS
-        .iter()
-        .filter(|(_, _, _, gate)| gate.map(|id| c.b(id)).unwrap_or(true))
-        .map(|&(glyph, label, action, _)| (glyph, label, action))
-        .collect()
-}
-
-fn menu_metrics() -> (i32, i32, i32) {
-    let c = config::current();
-    let item_h = ui::s(c.get(Id::MenuAltoElemento));
-    let pad = ui::s(8);
-    (ui::s(c.get(Id::MenuAncho)), item_h, pad)
-}
-
-thread_local! {
-    static MENU_HOVER: RefCell<isize> = RefCell::new(-1);
-}
+// El menú (estilo Windows 7, con lista de programas y búsqueda) vive en
+// `startmenu`; aquí solo quedan el lanzador de la propia aplicación y la
+// creación de su ventana.
 
 fn own_exe() -> String {
     let mut buf = [0u16; 512];
@@ -255,7 +227,9 @@ fn own_exe() -> String {
     String::from_utf16_lossy(&buf[..n as usize])
 }
 
-fn launch_own(args: &str) {
+/// Lanza otra instancia de OptimizedShell con los argumentos dados
+/// (`--settings`, `--explorer <ruta>`, `--taskmgr`, `--lock`...).
+pub fn launch_own(args: &str) {
     let exe = own_exe();
     unsafe {
         ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide(&exe).as_ptr(),
@@ -263,110 +237,8 @@ fn launch_own(args: &str) {
     }
 }
 
-fn menu_action(i: usize) {
-    match i {
-        0 => launch_own("--settings"),
-        1 => launch_own("--explorer"),
-        2 => launch_own("--taskmgr"),
-        3 => unsafe {
-            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide("explorer.exe").as_ptr(),
-                          ui::wide("shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}").as_ptr(), std::ptr::null(), SW_SHOWNORMAL);
-        },
-        4 => launch_own("--lock"),
-        5 => unsafe { ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED); },
-        6 => unsafe { ExitWindowsEx(EWX_SHUTDOWN, SHTDN_REASON_FLAG_PLANNED); },
-        _ => {}
-    }
-}
-
-unsafe extern "system" fn menu_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg == ui::config_changed_msg() {
-        ui::reload_config();
-        InvalidateRect(hwnd, std::ptr::null(), 0);
-        return 0;
-    }
-    match msg {
-        WM_ERASEBKGND => 1,
-        WM_PAINT => {
-            let (_, item_h, pad) = menu_metrics();
-            let items = menu_items();
-            let icons = config::current().b(Id::MenuIconos);
-            window::paint_buffered(hwnd, |g: &Gfx, w, h| {
-                let s = theme::style();
-                g.clear(theme::argb(0, 0, 0, 0));
-                g.rounded(0.0, 0.0, w as f32, h as f32, ui::sf(10.0), Some(s.menu_bg), Some((s.menu_border, 1.0)));
-                let hov = MENU_HOVER.with(|m| *m.borrow());
-                for (i, (glyph, label, _)) in items.iter().enumerate() {
-                    let y = pad + i as i32 * item_h;
-                    if hov == i as isize {
-                        g.rounded(ui::s(6) as f32, y as f32, (w - ui::s(12)) as f32, item_h as f32,
-                                  ui::sf(6.0), Some(s.menu_hover), None);
-                    }
-                    let tx = if icons {
-                        g.text_in(glyph, ui::s(16) as f32, y as f32, ui::s(24) as f32, item_h as f32,
-                                  13.0, false, s.accent, Align::Center, Align::Center, true);
-                        ui::s(48)
-                    } else {
-                        ui::s(18)
-                    };
-                    g.text_in(label, tx as f32, y as f32, (w - tx - ui::s(12)) as f32, item_h as f32,
-                              13.0, false, s.text, Align::Near, Align::Center, false);
-                }
-            });
-            0
-        }
-        WM_MOUSEMOVE => {
-            let (_, item_h, pad) = menu_metrics();
-            let n = menu_items().len();
-            let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-            let i = (y - pad) / item_h.max(1);
-            let v = if i >= 0 && (i as usize) < n { i as isize } else { -1 };
-            if MENU_HOVER.with(|m| m.replace(v)) != v {
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-            }
-            0
-        }
-        WM_LBUTTONDOWN => {
-            let (_, item_h, pad) = menu_metrics();
-            let items = menu_items();
-            let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-            let i = (y - pad) / item_h.max(1);
-            ShowWindow(hwnd, SW_HIDE);
-            if i >= 0 && (i as usize) < items.len() {
-                menu_action(items[i as usize].2);
-            }
-            0
-        }
-        WM_ACTIVATE => {
-            if (wp & 0xFFFF) == WA_INACTIVE as usize {
-                ShowWindow(hwnd, SW_HIDE);
-            }
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
-    }
-}
-
 fn toggle_menu(st: &State) {
-    unsafe {
-        if IsWindowVisible(st.menu) != 0 {
-            ShowWindow(st.menu, SW_HIDE);
-            return;
-        }
-        let (w, item_h, pad) = menu_metrics();
-        let h = pad * 2 + menu_items().len() as i32 * item_h;
-        let mut br = er();
-        GetWindowRect(st.hwnd, &mut br);
-        let x = br.left + ui::s(8);
-        // Debajo de la barra si está arriba, encima si está abajo.
-        let y = if config::current().get(Id::BarraPosicion) == 1 {
-            br.bottom + ui::s(8)
-        } else {
-            br.top - h - ui::s(8)
-        };
-        SetWindowPos(st.menu, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
-        SetForegroundWindow(st.menu);
-    }
+    startmenu::toggle(st.menu, st.hwnd);
 }
 
 // ------------------------------------------------------------ colocación
@@ -561,11 +433,7 @@ pub fn run() -> i32 {
         };
         RegisterClassW(&wc);
 
-        let menu_class = ui::wide("OShellRustStartMenu");
-        let wcm = WNDCLASSW { lpfnWndProc: Some(menu_proc), lpszClassName: menu_class.as_ptr(), hInstance: hinst,
-            style: 0, cbClsExtra: 0, cbWndExtra: 0, hIcon: std::ptr::null_mut(),
-            hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: std::ptr::null_mut(), lpszMenuName: std::ptr::null() };
-        RegisterClassW(&wcm);
+        startmenu::register(hinst);
 
         let r = bar_rect();
         let hwnd = CreateWindowExW(
@@ -582,18 +450,7 @@ pub fn run() -> i32 {
         if hwnd.is_null() {
             return 1;
         }
-        let (menu_w, item_h, pad) = menu_metrics();
-        let menu = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            menu_class.as_ptr(),
-            ui::wide("Inicio").as_ptr(),
-            WS_POPUP,
-            0, 0, menu_w, pad * 2 + menu_items().len() as i32 * item_h,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            hinst,
-            std::ptr::null(),
-        );
+        let menu = startmenu::create(hinst);
 
         let st = Box::new(State {
             hwnd,

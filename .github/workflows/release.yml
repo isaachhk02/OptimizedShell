@@ -82,12 +82,14 @@ jobs:
 
           | Modo | Comando |
           |---|---|
-          | Barra de tareas (shell) | `OptimizedShell.exe` |
-          | Administrador de tareas | `--taskmgr` |
+          | Barra de tareas (shell) + menú Inicio | `OptimizedShell.exe` |
+          | Administrador de tareas | `--taskmgr [rendimiento\|inicio\|servicios]` |
           | Explorador de archivos | `--explorer [ruta]` |
           | Bloqueo / inicio de sesión | `--lock` · `--logon` |
           | Configuración | `--settings [pagina]` |
           | Instalar / desinstalar como shell | `--install` · `--uninstall` |
+
+          Incluye la pestaña **Rendimiento** del administrador (CPU total y por núcleo, memoria, GPUs con nombre y VRAM, y temperatura de las zonas térmicas ACPI) y un **menú Inicio estilo Windows 7**: programas más usados, «Todos los programas», búsqueda en vivo y columna derecha con carpetas, Equipo, Panel de control y apagado.
 
           La interfaz es configurable desde `--settings` (tema, barra de tareas, menú Inicio, listas y rendimiento); los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini`.
 

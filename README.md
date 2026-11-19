@@ -9,8 +9,8 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
 
 | Modo | Comando | Qué hace |
 |---|---|---|
-| Shell | `OptimizedShell.exe` | Barra de tareas acoplada abajo con botón Inicio, ventanas abiertas, reloj y menú Inicio |
-| Administrador de tareas | `--taskmgr` | Procesos (CPU/memoria/hilos), Inicio, Rendimiento, Servicios |
+| Shell | `OptimizedShell.exe` | Barra de tareas acoplada con botón Inicio, ventanas abiertas, reloj y menú Inicio estilo Windows 7 |
+| Administrador de tareas | `--taskmgr [rendimiento\|inicio\|servicios]` | Procesos (CPU/memoria/hilos), Rendimiento (CPU, GPU, RAM, temperatura), Inicio, Servicios |
 | Explorador de archivos | `--explorer [ruta]` | Navegación, panel lateral y columnas ordenables |
 | Bloqueo / inicio de sesión | `--lock` · `--logon [--demo]` | Pantalla de bloqueo propia con autenticación |
 | Configuración | `--settings [personalizacion\|barra\|menu\|listas\|rendimiento\|fondo\|pantalla\|bluetooth]` | Toda la interfaz: tema, barra de tareas, menú Inicio, listas y rendimiento |
@@ -36,9 +36,12 @@ dibuja recorriendo esa tabla, así que **añadir un ajuste es añadir una fila**
   - *Barra de tareas*: alto, posición (arriba/abajo), alineación de los botones,
     ancho de botón, títulos, botón Inicio, reloj (12/24 h, segundos, fecha),
     reserva del área de trabajo, siempre visible e intervalo de refresco.
-  - *Menú Inicio*: ancho, alto de elemento, iconos y qué entradas incluye.
+  - *Menú Inicio*: ancho de la lista, alto del menú y de cada elemento, columna
+    derecha, cuadro de búsqueda, cuántos programas frecuentes se muestran,
+    iconos de los programas y qué entradas incluye.
   - *Listas y explorador*: alto de fila, panel lateral, archivos ocultos,
-    carpetas primero, columnas Fecha/Tipo/Tamaño y refresco del administrador.
+    carpetas primero, columnas Fecha/Tipo/Tamaño, refresco del administrador y,
+    para la pestaña Rendimiento, gráficas por núcleo y segundos de historial.
   - *Rendimiento*: EcoQoS y liberación de memoria.
 - **Atajos**: rueda del ratón para desplazar, flechas ←/→ sobre un control para
   ajustarlo, y botones «Restablecer esta página», «Restablecer todo» y «Abrir
@@ -76,6 +79,18 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 - **Administrador de tareas**: marco propio (barra de título, min/max/cerrar), pestañas,
   tabla de procesos con %CPU por delta y colores por umbral, filtrado, fin de proceso y
   pestaña Inicio (habilitar/deshabilitar con las claves StartupApproved de Windows).
+- **Rendimiento** (`--taskmgr rendimiento`): una tarjeta con mini gráfica por
+  dispositivo y, a la derecha, la gráfica grande y los datos del seleccionado.
+  - *CPU*: uso total y por núcleo (`NtQuerySystemInformation` clase 8), nombre y
+    velocidad base del procesador, núcleos lógicos/físicos, procesos e hilos.
+  - *Memoria*: en uso, disponible, total y confirmación (`GlobalMemoryStatusEx`).
+  - *GPUs*: uso y memoria dedicada por adaptador, con los contadores PDH
+    `GPU Engine` / `GPU Adapter Memory` agrupados por LUID y el nombre y la VRAM
+    que da DXGI (`EnumAdapters1`).
+  - *Temperatura*: zonas térmicas ACPI (`Thermal Zone Information`) en °C.
+  - El muestreador solo se abre mientras la pestaña está a la vista, y si una
+    fuente no existe (sin contadores de GPU, sin sensores ACPI) se dice por qué
+    en vez de enseñar un cero.
 - **Configuración**: cinco páginas generadas desde la tabla de ajustes
   (Personalización, Barra de tareas, Menú Inicio, Listas y explorador,
   Rendimiento), con guardado en `config.ini` y aplicación en caliente.
@@ -84,14 +99,22 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 - **Bloqueo**: reloj, tarjeta de usuario y autenticación con `LogonUserW`.
 - **Shell**: barra de tareas con botón Inicio, botones de ventanas abiertas y reloj;
   `--install`/`--uninstall` sobre el valor `Shell` de Winlogon.
+- **Menú Inicio estilo Windows 7**: a la izquierda los programas más usados y el
+  botón «Todos los programas» (lista completa con desplazamiento), abajo un
+  cuadro de búsqueda que filtra mientras se escribe (Esc cierra, Entrar abre el
+  seleccionado, flechas y AvPág/RePág mueven); a la derecha el usuario, las
+  carpetas personales, Equipo, Panel de control, las herramientas propias y los
+  botones de bloquear/reiniciar/apagar. Los programas son los accesos directos
+  reales de los menús Inicio del usuario y de todos los usuarios, con su icono
+  del shell y un contador de uso en `%APPDATA%\OptimizedShell\recent.ini`.
 
 ### Pendiente
 
-- Task Manager: gráficas de Rendimiento (PDH), pestaña Servicios, iconos por fila,
+- Task Manager: pestaña Servicios, iconos por fila,
   EcoQoS/prioridad/afinidad por proceso.
 - Configuración: páginas Fondo (galería de miniaturas), Pantalla (DisplayConfig/WMI) y
   Bluetooth (WinRT).
 - Explorador: operaciones COM (`IFileOperation`), portapapeles, arrastrar y soltar,
   refresco por `ReadDirectoryChangesW`, menú contextual del shell.
-- Shell: escritorio con fondo, menú Inicio con búsqueda de apps, bandeja del sistema,
-  flyouts de volumen/Wi‑Fi/batería, hotkeys globales.
+- Shell: escritorio con fondo, bandeja del sistema, flyouts de
+  volumen/Wi‑Fi/batería, hotkeys globales y anclar programas al menú Inicio.

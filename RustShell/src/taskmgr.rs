@@ -29,6 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use crate::ui::gdip::{Align, Chrome, Gfx};
 use crate::ui::config::{self, Id};
 use crate::ui::{self, theme, window};
+use crate::perf;
 use crate::startup;
 
 // ---------------------------------------------------------------- Nt API
@@ -98,6 +99,7 @@ const B_TAB0: i32 = 10; // + índice de pestaña
 const B_END: i32 = 20; // Finalizar tarea
 const B_NEWTASK: i32 = 21; // Nueva tarea
 const B_TOGGLE: i32 = 22; // Habilitar/Deshabilitar (Inicio)
+const B_PERF0: i32 = 200; // + índice de la tarjeta de dispositivo (Rendimiento)
 
 const STARTUP_COLS: [Col; 4] = [
     Col { title: "Nombre", width: 240, right: false },
@@ -127,6 +129,37 @@ const PROC_COLS: [Col; 6] = [
     Col { title: "E/S", width: 96, right: true },
     Col { title: "Hilos", width: 64, right: true },
 ];
+
+// ------------------------------------------------- dispositivos de Rendimiento
+#[derive(Clone, Copy, PartialEq)]
+enum DevKind {
+    Cpu,
+    Mem,
+    Gpu,
+    Temp,
+}
+
+/// Una tarjeta de la pestaña Rendimiento (CPU, memoria, una GPU o un sensor).
+struct PerfDev {
+    /// Clave estable entre refrescos: por ella se conserva el historial.
+    key: String,
+    kind: DevKind,
+    title: String,
+    subtitle: String,
+    /// Texto grande (ya formateado).
+    display: String,
+    /// Valor para la gráfica, en % del máximo.
+    pct: f32,
+    /// Escala del eje Y ("100 %", "100 °C", "24 GB"...).
+    axis: String,
+    detail: Vec<(String, String)>,
+    /// Historial circular (0-100), el último valor es el más reciente.
+    hist: Vec<f32>,
+    /// Historial por núcleo (solo CPU).
+    cores: Vec<Vec<f32>>,
+    /// Sin datos: se dibuja el aviso en lugar de una gráfica a cero.
+    missing: Option<String>,
+}
 
 // ---------------------------------------------------------------- estado
 struct State {
@@ -162,6 +195,14 @@ struct State {
     mem_total: u64,
     mem_load: u32,
     cpu_total: f64,
+    // Rendimiento
+    /// Muestreador abierto solo mientras la pestaña está a la vista.
+    sampler: Option<perf::Sampler>,
+    perf_devs: Vec<PerfDev>,
+    perf_sel: usize,
+    perf_list: RECT,
+    perf_main: RECT,
+    perf_cards: Vec<RECT>,
 }
 
 
@@ -259,6 +300,203 @@ fn snapshot(st: &mut State) {
     }
 
     rebuild_view(st);
+    // Las métricas de Rendimiento solo se toman si la pestaña está a la vista.
+    sample_perf(st);
+}
+
+// ------------------------------------------------- muestreo de Rendimiento
+fn gb(v: u64) -> String {
+    format!("{:.1} GB", v as f64 / 1_073_741_824.0)
+}
+
+/// Puntos de historial que caben según los segundos elegidos y el refresco.
+fn hist_points() -> usize {
+    let c = config::current();
+    let secs = c.get(Id::PerfHistorial).max(10) as i64;
+    let refresh = c.get(Id::TaskmgrRefresco).max(100) as i64;
+    ((secs * 1000 / refresh) as usize).clamp(20, 600)
+}
+
+fn push_hist(h: &mut Vec<f32>, v: f32, cap: usize) {
+    h.push(v.clamp(0.0, 100.0));
+    if h.len() > cap {
+        let extra = h.len() - cap;
+        h.drain(0..extra);
+    }
+}
+
+/// Historial previo de una clave, para que cambiar de pestaña o de orden no
+/// borre las gráficas.
+fn take_hist(old: &mut [PerfDev], key: &str) -> (Vec<f32>, Vec<Vec<f32>>) {
+    match old.iter_mut().find(|d| d.key == key) {
+        Some(d) => (std::mem::take(&mut d.hist), std::mem::take(&mut d.cores)),
+        None => (Vec::new(), Vec::new()),
+    }
+}
+
+/// Toma una muestra y reconstruye las tarjetas de dispositivo.
+fn sample_perf(st: &mut State) {
+    let Some(sampler) = st.sampler.as_mut() else { return };
+    let snap = sampler.sample();
+    let info = sampler.info.clone();
+    let cap = hist_points();
+    let mut old = std::mem::take(&mut st.perf_devs);
+    let mut devs: Vec<PerfDev> = Vec::new();
+
+    // ---- CPU
+    {
+        let (mut hist, mut cores) = take_hist(&mut old, "cpu");
+        push_hist(&mut hist, snap.cpu_total as f32, cap);
+        cores.resize(snap.cpu_cores.len(), Vec::new());
+        for (i, v) in snap.cpu_cores.iter().enumerate() {
+            push_hist(&mut cores[i], *v as f32, cap);
+        }
+        let threads: u32 = st.procs.iter().map(|p| p.threads).sum();
+        devs.push(PerfDev {
+            key: "cpu".into(),
+            kind: DevKind::Cpu,
+            title: "CPU".into(),
+            subtitle: if info.name.is_empty() { "Procesador".into() } else { info.name.clone() },
+            display: format!("{:.0} %", snap.cpu_total),
+            pct: snap.cpu_total as f32,
+            axis: "100 %".into(),
+            detail: vec![
+                ("Uso".into(), format!("{:.1} %", snap.cpu_total)),
+                ("Núcleos lógicos".into(), info.logical.to_string()),
+                ("Núcleos físicos".into(), info.physical.to_string()),
+                ("Velocidad base".into(), if info.mhz > 0 { format!("{:.2} GHz", info.mhz as f64 / 1000.0) } else { "—".into() }),
+                ("Procesos".into(), st.procs.len().to_string()),
+                ("Hilos".into(), threads.to_string()),
+            ],
+            hist,
+            cores,
+            missing: None,
+        });
+    }
+
+    // ---- Memoria
+    {
+        let (mut hist, _) = take_hist(&mut old, "mem");
+        let m = &snap.mem;
+        push_hist(&mut hist, m.load as f32, cap);
+        devs.push(PerfDev {
+            key: "mem".into(),
+            kind: DevKind::Mem,
+            title: "Memoria".into(),
+            subtitle: format!("{} en uso de {}", gb(m.used), gb(m.total)),
+            display: format!("{} %", m.load),
+            pct: m.load as f32,
+            axis: gb(m.total),
+            detail: vec![
+                ("En uso".into(), gb(m.used)),
+                ("Disponible".into(), gb(m.total.saturating_sub(m.used))),
+                ("Total".into(), gb(m.total)),
+                ("Confirmación".into(), format!("{} / {}", gb(m.commit_used), gb(m.commit_total))),
+                ("Uso".into(), format!("{} %", m.load)),
+            ],
+            hist,
+            cores: Vec::new(),
+            missing: None,
+        });
+    }
+
+    // ---- GPUs
+    if snap.gpus.is_empty() {
+        let (hist, _) = take_hist(&mut old, "gpu:none");
+        devs.push(PerfDev {
+            key: "gpu:none".into(),
+            kind: DevKind::Gpu,
+            title: "GPU".into(),
+            subtitle: "Sin datos".into(),
+            display: "—".into(),
+            pct: 0.0,
+            axis: "100 %".into(),
+            detail: Vec::new(),
+            hist,
+            cores: Vec::new(),
+            missing: Some(if snap.gpu_counters {
+                "No se ha encontrado ningún adaptador gráfico con contadores de uso.".into()
+            } else {
+                "Este Windows no expone los contadores «GPU Engine» (requiere Windows 10 1709 o posterior).".into()
+            }),
+        });
+    }
+    for (i, gpuv) in snap.gpus.iter().enumerate() {
+        let key = format!("gpu:{}", gpuv.key);
+        let (mut hist, _) = take_hist(&mut old, &key);
+        push_hist(&mut hist, gpuv.usage as f32, cap);
+        let mut detail = vec![
+            ("Uso".into(), format!("{:.0} %", gpuv.usage)),
+            ("Adaptador".into(), gpuv.name.clone()),
+        ];
+        if gpuv.mem_total > 0 {
+            detail.push(("Memoria dedicada".into(), format!("{} / {}", gb(gpuv.mem_used), gb(gpuv.mem_total))));
+        } else if gpuv.mem_used > 0 {
+            detail.push(("Memoria dedicada".into(), gb(gpuv.mem_used)));
+        }
+        devs.push(PerfDev {
+            key,
+            kind: DevKind::Gpu,
+            title: if snap.gpus.len() > 1 { format!("GPU {}", i) } else { "GPU".into() },
+            subtitle: gpuv.name.clone(),
+            display: format!("{:.0} %", gpuv.usage),
+            pct: gpuv.usage as f32,
+            axis: "100 %".into(),
+            detail,
+            hist,
+            cores: Vec::new(),
+            missing: None,
+        });
+    }
+
+    // ---- Temperatura
+    if snap.temps.is_empty() {
+        let (hist, _) = take_hist(&mut old, "temp:none");
+        devs.push(PerfDev {
+            key: "temp:none".into(),
+            kind: DevKind::Temp,
+            title: "Temperatura".into(),
+            subtitle: "Sin sensores".into(),
+            display: "—".into(),
+            pct: 0.0,
+            axis: "100 °C".into(),
+            detail: Vec::new(),
+            hist,
+            cores: Vec::new(),
+            missing: Some(
+                "El equipo no expone zonas térmicas ACPI al sistema. Muchos portátiles y placas \
+                 solo publican la temperatura por su propio controlador, no por Windows."
+                    .into(),
+            ),
+        });
+    }
+    for t in snap.temps.iter() {
+        let (mut hist, _) = take_hist(&mut old, &t.key);
+        // El eje llega a 100 °C: así la gráfica es comparable entre sensores.
+        push_hist(&mut hist, t.celsius as f32, cap);
+        devs.push(PerfDev {
+            key: t.key.clone(),
+            kind: DevKind::Temp,
+            title: format!("Temp. {}", t.name),
+            subtitle: "Zona térmica ACPI".into(),
+            display: format!("{:.0} °C", t.celsius),
+            pct: t.celsius as f32,
+            axis: "100 °C".into(),
+            detail: vec![
+                ("Temperatura".into(), format!("{:.1} °C", t.celsius)),
+                ("Sensor".into(), t.name.clone()),
+            ],
+            hist,
+            cores: Vec::new(),
+            missing: None,
+        });
+    }
+
+    st.perf_devs = devs;
+    if st.perf_sel >= st.perf_devs.len() {
+        st.perf_sel = 0;
+    }
+    layout(st);
 }
 
 fn cell(p: &Proc, c: usize) -> String {
@@ -345,6 +583,21 @@ fn layout(st: &mut State) {
     // contenido
     st.content = RECT { left: ui::s(8), top: y + bh + ui::s(10), right: w - ui::s(8), bottom: h - ui::s(8) };
 
+    // Rendimiento: lista de dispositivos a la izquierda, detalle a la derecha.
+    if st.tab == Tab::Perf {
+        let list_w = ui::s(250).min((st.content.right - st.content.left) / 3);
+        st.perf_list = RECT { left: st.content.left + ui::s(4), top: st.content.top, right: st.content.left + list_w, bottom: st.content.bottom };
+        st.perf_main = RECT { left: st.perf_list.right + ui::s(14), top: st.content.top, right: st.content.right - ui::s(6), bottom: st.content.bottom };
+        let card_h = ui::s(62);
+        let gap = ui::s(8);
+        st.perf_cards = (0..st.perf_devs.len())
+            .map(|i| {
+                let top = st.perf_list.top + i as i32 * (card_h + gap);
+                RECT { left: st.perf_list.left, top, right: st.perf_list.right, bottom: top + card_h }
+            })
+            .collect();
+    }
+
     // columnas de la tabla (según la pestaña)
     let cols = columns(st.tab);
     let body_left = st.content.left + ui::s(8);
@@ -416,9 +669,12 @@ fn paint(st: &State) {
             }
         }
         // resumen a la derecha
+        // Con la pestaña Rendimiento abierta se usa la medida del muestreador
+        // (tiempos de procesador), más exacta que la suma de los procesos.
+        let cpu = st.perf_devs.iter().find(|d| d.kind == DevKind::Cpu).map(|d| d.pct as f64).unwrap_or(st.cpu_total);
         let summary = format!(
             "CPU {:.0} %   ·   Memoria {} / {} ({} %)   ·   {} procesos",
-            st.cpu_total, format_bytes(st.mem_used), format_bytes(st.mem_total), st.mem_load, st.procs.len()
+            cpu, format_bytes(st.mem_used), format_bytes(st.mem_total), st.mem_load, st.procs.len()
         );
         let last = st.tab_rc[3];
         g.text_in(&summary, (last.right + ui::s(16)) as f32, st.tab_rc[0].top as f32,
@@ -461,6 +717,7 @@ fn paint(st: &State) {
         // cuerpo según la pestaña
         match st.tab {
             Tab::Proc => paint_table(g, &s, st),
+            Tab::Perf => paint_perf(g, &s, st),
             Tab::Startup => paint_startup(g, &s, st),
             _ => {
                 g.text_in(
@@ -506,6 +763,191 @@ fn draw_button(g: &Gfx, s: &theme::Style, rc: RECT, label: &str, hov: bool, prim
               ui::sf(6.0), Some(fill), Some((border, 1.0)));
     g.text_in(label, rc.left as f32, rc.top as f32, (rc.right - rc.left) as f32, (rc.bottom - rc.top) as f32,
               13.0, false, fg, Align::Center, Align::Center, false);
+}
+
+// ------------------------------------------------- pintado de Rendimiento
+fn dev_color(s: &theme::Style, d: &PerfDev) -> u32 {
+    match d.kind {
+        DevKind::Mem => s.success,
+        DevKind::Temp => {
+            // El color avisa antes que el número.
+            if d.pct >= 85.0 { s.danger } else if d.pct >= 70.0 { s.warning } else { s.success }
+        }
+        _ => s.accent,
+    }
+}
+
+/// Gráfica de historial: fondo, cuadrícula, área y curva.
+fn draw_graph(g: &Gfx, s: &theme::Style, rc: RECT, hist: &[f32], color: u32, grid: bool, width: f32) {
+    let (x0, y0) = (rc.left as f32, rc.top as f32);
+    let w = (rc.right - rc.left) as f32;
+    let h = (rc.bottom - rc.top) as f32;
+    if w <= 2.0 || h <= 2.0 {
+        return;
+    }
+    g.rounded(x0, y0, w, h, ui::sf(6.0), Some(s.graph_bg), Some((s.card_border, 1.0)));
+    if grid {
+        for i in 1..4 {
+            let y = y0 + h * i as f32 / 4.0;
+            g.line(x0 + 1.0, y, x0 + w - 1.0, y, s.grid_line, 1.0);
+        }
+        for i in 1..6 {
+            let x = x0 + w * i as f32 / 6.0;
+            g.line(x, y0 + 1.0, x, y0 + h - 1.0, s.grid_line, 1.0);
+        }
+    }
+    let n = hist.len();
+    if n < 2 {
+        return;
+    }
+    // El eje X es fijo (los segundos configurados): el historial se va
+    // llenando desde la derecha, como en el administrador de Windows.
+    let cap = hist_points().max(2) as f32;
+    let step = w / (cap - 1.0);
+    let pts: Vec<(f32, f32)> = hist
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = (x0 + w - (n - 1 - i) as f32 * step).max(x0);
+            (x, y0 + h - (v / 100.0).clamp(0.0, 1.0) * h)
+        })
+        .collect();
+    let mut poly = pts.clone();
+    poly.push((pts[pts.len() - 1].0, y0 + h));
+    poly.push((pts[0].0, y0 + h));
+    g.fill_poly(&poly, theme::with_alpha(color, 64));
+    g.draw_lines(&pts, color, width);
+}
+
+fn paint_perf(g: &Gfx, s: &theme::Style, st: &State) {
+    if st.perf_devs.is_empty() {
+        g.text_in("Tomando la primera muestra...", st.content.left as f32, (st.content.top + ui::s(20)) as f32,
+                  (st.content.right - st.content.left) as f32, ui::s(28) as f32, 13.0, false, s.text_faint,
+                  Align::Center, Align::Center, false);
+        return;
+    }
+
+    // ---- columna izquierda: una tarjeta por dispositivo
+    for (i, d) in st.perf_devs.iter().enumerate() {
+        let Some(r) = st.perf_cards.get(i) else { continue };
+        if r.bottom > st.perf_list.bottom {
+            break;
+        }
+        let sel = i == st.perf_sel;
+        let hov = st.hover_btn == B_PERF0 + i as i32;
+        let col = dev_color(s, d);
+        g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32,
+                  ui::sf(8.0), Some(if sel { s.row_selected } else if hov { s.row_hover } else { s.card_bg }),
+                  Some((if sel { col } else { s.card_border }, if sel { 1.6 } else { 1.0 })));
+        // mini gráfica de fondo, en la mitad derecha de la tarjeta
+        // La mini gráfica ocupa la mitad derecha, por encima del subtítulo.
+        let mini = RECT {
+            left: r.left + (r.right - r.left) * 55 / 100,
+            top: r.top + ui::s(8),
+            right: r.right - ui::s(10),
+            bottom: r.bottom - ui::s(22),
+        };
+        if d.missing.is_none() {
+            draw_graph(g, s, mini, &d.hist, col, false, ui::sf(1.2));
+        }
+        g.text_in(&d.title, (r.left + ui::s(12)) as f32, (r.top + ui::s(6)) as f32,
+                  ((r.right - r.left) * 55 / 100 - ui::s(14)) as f32, ui::s(20) as f32, 12.5, true,
+                  s.text, Align::Near, Align::Center, false);
+        g.text_in(&d.display, (r.left + ui::s(12)) as f32, (r.top + ui::s(26)) as f32,
+                  ((r.right - r.left) * 55 / 100 - ui::s(14)) as f32, ui::s(22) as f32, 15.0, true, col,
+                  Align::Near, Align::Center, false);
+        g.text_in(&d.subtitle, (r.left + ui::s(12)) as f32, (r.bottom - ui::s(20)) as f32,
+                  ((r.right - r.left) - ui::s(20)) as f32, ui::s(16) as f32, 10.0, false, s.text_faint,
+                  Align::Near, Align::Center, false);
+    }
+
+    // ---- panel derecho: dispositivo seleccionado
+    let Some(d) = st.perf_devs.get(st.perf_sel) else { return };
+    let m = st.perf_main;
+    let col = dev_color(s, d);
+    g.text_in(&d.title, m.left as f32, m.top as f32, ((m.right - m.left) / 2) as f32, ui::s(30) as f32,
+              19.0, true, s.text, Align::Near, Align::Center, false);
+    g.text_in(&d.subtitle, m.left as f32, (m.top + ui::s(28)) as f32, ((m.right - m.left) * 2 / 3) as f32,
+              ui::s(20) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+    g.text_in(&d.display, (m.right - ui::s(200)) as f32, m.top as f32, ui::s(200) as f32, ui::s(40) as f32,
+              24.0, true, col, Align::Far, Align::Center, false);
+
+    let top = m.top + ui::s(54);
+    if let Some(msg) = &d.missing {
+        let box_rc = RECT { left: m.left, top, right: m.right, bottom: m.bottom };
+        g.rounded(box_rc.left as f32, box_rc.top as f32, (box_rc.right - box_rc.left) as f32,
+                  (box_rc.bottom - box_rc.top) as f32, ui::sf(8.0), Some(s.graph_bg), Some((s.card_border, 1.0)));
+        g.text_in("\u{E783}", box_rc.left as f32, (box_rc.top + ui::s(40)) as f32,
+                  (box_rc.right - box_rc.left) as f32, ui::s(40) as f32, 22.0, false, s.text_faint,
+                  Align::Center, Align::Center, true);
+        g.text_in("Sin datos disponibles", box_rc.left as f32, (box_rc.top + ui::s(86)) as f32,
+                  (box_rc.right - box_rc.left) as f32, ui::s(26) as f32, 14.0, true, s.text_dim,
+                  Align::Center, Align::Center, false);
+        g.text_in(msg, (box_rc.left + ui::s(40)) as f32, (box_rc.top + ui::s(112)) as f32,
+                  (box_rc.right - box_rc.left - ui::s(80)) as f32, ui::s(60) as f32, 12.0, false, s.text_faint,
+                  Align::Center, Align::Near, false);
+        return;
+    }
+
+    // Reparto vertical: gráfica grande, (opcional) rejilla por núcleo y datos.
+    let rows = (d.detail.len() as i32 + 1) / 2;
+    let detail_h = rows * ui::s(24) + ui::s(14);
+    let show_cores = d.kind == DevKind::Cpu
+        && config::current().b(Id::PerfPorNucleo)
+        && !d.cores.is_empty();
+    let avail = (m.bottom - top - detail_h).max(ui::s(120));
+    let cores_h = if show_cores { (avail * 38 / 100).max(ui::s(70)) } else { 0 };
+    let graph_h = avail - cores_h - if show_cores { ui::s(26) } else { 0 };
+    let graph = RECT { left: m.left, top, right: m.right, bottom: top + graph_h };
+    draw_graph(g, s, graph, &d.hist, col, true, ui::sf(1.8));
+    // etiquetas de los ejes
+    g.text_in(&d.axis, (graph.left + ui::s(6)) as f32, (graph.top + ui::s(2)) as f32, ui::s(90) as f32,
+              ui::s(16) as f32, 10.0, false, s.text_faint, Align::Near, Align::Near, false);
+    g.text_in("0", (graph.left + ui::s(6)) as f32, (graph.bottom - ui::s(18)) as f32, ui::s(60) as f32,
+              ui::s(16) as f32, 10.0, false, s.text_faint, Align::Near, Align::Near, false);
+    g.text_in(&format!("{} s", config::current().get(Id::PerfHistorial)),
+              (graph.left + ui::s(6)) as f32, (graph.bottom - ui::s(18)) as f32,
+              (graph.right - graph.left - ui::s(14)) as f32, ui::s(16) as f32, 10.0, false, s.text_faint,
+              Align::Far, Align::Near, false);
+
+    let mut y = graph.bottom + ui::s(12);
+    if show_cores {
+        g.text_in("Núcleos lógicos", m.left as f32, y as f32, (m.right - m.left) as f32, ui::s(16) as f32,
+                  10.5, true, s.text_dim, Align::Near, Align::Center, false);
+        y += ui::s(18);
+        let n = d.cores.len() as i32;
+        let cols = if n <= 4 { n.max(1) } else if n <= 8 { 4 } else { 8 };
+        let crows = (n + cols - 1) / cols;
+        let gap = ui::s(6);
+        let cw = ((m.right - m.left) - (cols - 1) * gap) / cols;
+        let chh = ((cores_h - ui::s(18)) - (crows - 1) * gap) / crows.max(1);
+        for (i, hist) in d.cores.iter().enumerate() {
+            let cx = m.left + (i as i32 % cols) * (cw + gap);
+            let cy = y + (i as i32 / cols) * (chh + gap);
+            let rc = RECT { left: cx, top: cy, right: cx + cw, bottom: cy + chh };
+            if rc.bottom > m.bottom - detail_h {
+                break;
+            }
+            draw_graph(g, s, rc, hist, col, false, ui::sf(1.2));
+            g.text_in(&format!("{}", i), (rc.left + ui::s(4)) as f32, (rc.top + ui::s(1)) as f32,
+                      ui::s(24) as f32, ui::s(14) as f32, 9.0, false, s.text_faint, Align::Near, Align::Near, false);
+        }
+        y += cores_h - ui::s(18) + ui::s(10);
+    }
+
+    // ---- datos del dispositivo, en dos columnas
+    let colw = (m.right - m.left) / 2;
+    for (i, (k, v)) in d.detail.iter().enumerate() {
+        let cx = m.left + (i as i32 % 2) * colw;
+        let cy = y + (i as i32 / 2) * ui::s(24);
+        if cy + ui::s(20) > m.bottom {
+            break;
+        }
+        g.text_in(k, cx as f32, cy as f32, (colw / 2) as f32, ui::s(22) as f32, 11.5, false, s.text_dim,
+                  Align::Near, Align::Center, false);
+        g.text_in(v, (cx + colw / 2) as f32, cy as f32, (colw / 2 - ui::s(16)) as f32, ui::s(22) as f32,
+                  11.5, true, s.text, Align::Near, Align::Center, false);
+    }
 }
 
 fn paint_table(g: &Gfx, s: &theme::Style, st: &State) {
@@ -666,6 +1108,13 @@ fn hit_test_btn(st: &State, x: i32, y: i32) -> i32 {
                 return B_TOGGLE;
             }
         }
+        Tab::Perf => {
+            for (i, r) in st.perf_cards.iter().enumerate() {
+                if in_rect(r, x, y) {
+                    return B_PERF0 + i as i32;
+                }
+            }
+        }
         _ => {}
     }
     B_NONE
@@ -737,6 +1186,19 @@ fn switch_tab(st: &mut State, t: Tab) {
     st.scroll = 0;
     if t == Tab::Startup {
         load_startup(st);
+    }
+    // El muestreador de Rendimiento (PDH incluido) solo vive mientras se ve la
+    // pestaña: fuera de ella no cuesta nada.
+    if t == Tab::Perf {
+        if st.sampler.is_none() {
+            st.sampler = Some(perf::Sampler::new());
+        }
+        layout(st);
+        sample_perf(st);
+    } else {
+        st.sampler = None;
+        st.perf_devs.clear();
+        st.perf_cards.clear();
     }
     layout(st);
 }
@@ -858,6 +1320,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     B_END => { end_selected(st); return 0; }
                     B_NEWTASK => { new_task(); return 0; }
                     B_TOGGLE => { toggle_startup(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
+                    b if b >= B_PERF0 => {
+                        st.perf_sel = (b - B_PERF0) as usize;
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                        return 0;
+                    }
                     b if b >= B_TAB0 && b < B_TAB0 + 4 => {
                         let t = match b - B_TAB0 { 0 => Tab::Proc, 1 => Tab::Perf, 2 => Tab::Startup, _ => Tab::Services };
                         switch_tab(st, t);
@@ -999,9 +1466,16 @@ pub fn run() -> i32 {
         }
 
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+        // Pestaña inicial por argumento: `--taskmgr rendimiento`.
+        let tab = match crate::args::positional().unwrap_or_default().to_lowercase().as_str() {
+            "rendimiento" | "perf" => Tab::Perf,
+            "inicio" | "startup" => Tab::Startup,
+            "servicios" | "services" => Tab::Services,
+            _ => Tab::Proc,
+        };
         let st = Box::new(State {
             hwnd,
-            tab: Tab::Proc,
+            tab,
             procs: Vec::new(),
             view: Vec::new(),
             prev_cpu: HashMap::new(),
@@ -1027,6 +1501,12 @@ pub fn run() -> i32 {
             mem_total: 0,
             mem_load: 0,
             cpu_total: 0.0,
+            sampler: None,
+            perf_devs: Vec::new(),
+            perf_sel: 0,
+            perf_list: empty_rect(),
+            perf_main: empty_rect(),
+            perf_cards: Vec::new(),
         });
         let st_raw = Box::into_raw(st);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, st_raw as isize);
@@ -1035,6 +1515,9 @@ pub fn run() -> i32 {
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         layout(&mut *st_raw);
+        if (*st_raw).tab == Tab::Perf {
+            (*st_raw).sampler = Some(perf::Sampler::new());
+        }
         snapshot(&mut *st_raw); // primer muestreo (sin %CPU)
         snapshot(&mut *st_raw); // segundo para tener %CPU inmediato no es posible aún; se llenará en el timer
         ShowWindow(hwnd, SW_SHOWNORMAL);

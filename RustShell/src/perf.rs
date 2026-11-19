@@ -495,9 +495,15 @@ impl Sampler {
                 });
             }
             // GPUs con contadores pero sin adaptador DXGI reconocido (raro).
+            // Solo se muestran si de verdad están haciendo algo: Windows expone
+            // LUID de motores virtuales (render remoto, captura) que si no
+            // ensuciarían la lista con entradas a cero.
             for (luid, v) in &usage {
+                let m = mem_used.iter().find(|(l, _)| l == luid).map(|(_, x)| *x).unwrap_or(0.0);
+                if *v < 0.5 && m <= 0.0 {
+                    continue;
+                }
                 if !snap.gpus.iter().any(|g| g.key == *luid) {
-                    let m = mem_used.iter().find(|(l, _)| l == luid).map(|(_, x)| *x).unwrap_or(0.0);
                     snap.gpus.push(Gpu {
                         key: luid.clone(),
                         name: format!("GPU ({})", luid),

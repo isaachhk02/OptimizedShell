@@ -15,6 +15,7 @@ mod settings;
 mod explorer;
 mod logon;
 mod shell;
+mod startmenu;
 
 use args::has_arg;
 

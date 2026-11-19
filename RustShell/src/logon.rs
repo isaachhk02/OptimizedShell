@@ -15,7 +15,6 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::args;
 use crate::ui::gdip::{Align, Gfx};
 use crate::ui::{self, theme, window};
 
