@@ -91,6 +91,16 @@ jobs:
 
           | Lanzar una notificación | `--notify "Título\|Mensaje"` |
 
+          **Escritorio y atajos**: ventana de escritorio con el papel tapiz del usuario (se omite sola si el Explorador sigue siendo el shell), atajos globales (`Win+E`, `Win+R`, `Win+I`, `Win+D`, `Win+N`, `Win+L`, `Ctrl+Mayús+Esc`, `Ctrl+Esc`) y programas anclados al menú Inicio.
+
+          **Explorador**: operaciones de archivo con `IFileOperation` (papelera, progreso, confirmaciones y deshacer), portapapeles CF_HDROP compatible con el Explorador de Windows, arrastrar y soltar, selección múltiple, renombrado en la fila, actualización automática con `ReadDirectoryChangesW` y menú contextual propio con acceso al del shell.
+
+          **Administrador de tareas**: pestaña **Servicios** (iniciar, detener, reiniciar y tipo de inicio), icono por proceso y menú con prioridad, modo de eficiencia (EcoQoS) y afinidad de procesadores.
+
+          **Bandeja**: iconos de las aplicaciones que usan `Shell_NotifyIcon`, y mosaicos que encienden y apagan de verdad las radios Wi-Fi y Bluetooth.
+
+          **Configuración**: galería de fondos con miniaturas y página de Pantalla propia (resolución, frecuencia y orientación, probando el modo antes de aplicarlo).
+
           **Barra de tareas**: botón Inicio con el logotipo de Windows (`shell32.dll`), a la izquierda o centrado como en Windows 11; botones de ventana con el icono real de cada aplicación; y **área de notificación** con volumen, red (Wi-Fi con intensidad y SSID, o Ethernet), batería, Bluetooth y campana de avisos. Al pulsar cualquier icono se abre el panel de **Configuración rápida** (mosaicos de red, Bluetooth, No molestar y tema, deslizador de volumen y estado del equipo).
 
           **Notificaciones**: avisos emergentes con cierre automático, centro de notificaciones con historial y No molestar, avisos propios de batería baja y de caída de la red, y `--notify` para que cualquier script avise al usuario.
