@@ -1118,6 +1118,9 @@ pub fn run() -> i32 {
         ShowWindow(hwnd, SW_SHOW);
         register_hotkeys(hwnd);
         ui::apply_perf();
+        // Busca versiones nuevas en GitHub (en un hilo aparte, si el ajuste
+        // está activado y toca comprobar) y limpia el .exe de la anterior.
+        crate::update::check_on_start();
 
         let code = window::message_loop();
         ui::shutdown();

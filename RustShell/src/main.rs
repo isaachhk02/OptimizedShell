@@ -4,6 +4,7 @@
 // Modos: (sin argumentos) shell | --taskmgr | --explorer [ruta] | --settings [seccion]
 //        --logon | --lock | --demo | --install | --uninstall
 //        --notify "Título|Mensaje" [--tipo info|ok|aviso|error]
+//        --update [--silent|--forzar]  (autoactualización desde GitHub)
 #![windows_subsystem = "windows"]
 
 mod args;
@@ -27,6 +28,7 @@ mod traynotify;
 mod display;
 mod fileops;
 mod watcher;
+mod update;
 
 use args::has_arg;
 
@@ -42,6 +44,8 @@ fn main() -> std::process::ExitCode {
         explorer::run()
     } else if has_arg("--install") || has_arg("--uninstall") {
         shell::install(has_arg("--install"))
+    } else if has_arg("--update") {
+        update::run()
     } else if has_arg("--notify") {
         send_notification()
     } else {

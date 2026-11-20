@@ -61,10 +61,11 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item $exe dist\OptimizedShell.exe
           Copy-Item README.md dist\README.md
+          Copy-Item LICENSE dist\LICENSE
           $hash = (Get-FileHash dist\OptimizedShell.exe -Algorithm SHA256).Hash
           $size = '{0:N0}' -f (Get-Item dist\OptimizedShell.exe).Length
           "$hash  OptimizedShell.exe" | Out-File dist\OptimizedShell.exe.sha256 -Encoding ascii
-          Compress-Archive -Path dist\OptimizedShell.exe, dist\README.md -DestinationPath "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip"
+          Compress-Archive -Path dist\OptimizedShell.exe, dist\README.md, dist\LICENSE -DestinationPath "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip"
           "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -88,6 +89,7 @@ jobs:
           | Bloqueo / inicio de sesión | `--lock` · `--logon` |
           | Configuración | `--settings [pagina]` |
           | Instalar / desinstalar como shell | `--install` · `--uninstall` |
+          | Buscar e instalar actualizaciones | `--update [--silent\|--forzar]` |
 
           | Lanzar una notificación | `--notify "Título\|Mensaje"` |
 
@@ -115,7 +117,11 @@ jobs:
 
           El **«Proceso inactivo del sistema»** (PID 0) ya no se lista entre los procesos: no es un proceso, sino la cuenta del tiempo que la CPU pasa sin trabajo, y por eso salía al 99 %. Su valor se enseña como *Inactivo* en los datos de la CPU. Y el ajuste **Confirmar al eliminar** ya pregunta de verdad antes de borrar, en el explorador y en el escritorio.
 
-          **La Configuración original de Windows 11 ya se abre** (corregido en 0.5.1): los enlaces `ms-settings:` (Pantalla, Sonido, Red, Bluetooth, Impresoras, Energía, Aplicaciones, Accesibilidad...) no abrían nada, porque la activación de las aplicaciones empaquetadas pasa por COM y los hilos de interfaz no lo inicializaban. Ahora se inicializa al abrir y, si la activación falla igualmente (caso típico cuando OptimizedShell es el shell y no hay un `explorer.exe` de sesión), se reintenta a través de `explorer.exe`. Afecta a la Configuración propia, al área de notificación y a los clics en volumen, red, Bluetooth y batería.
+          **Autoactualización desde GitHub** (nuevo en 0.6.0): `--update` busca la última release, comprueba el SHA-256 del ejecutable contra el `.sha256` publicado y sustituye el `OptimizedShell.exe` en caliente (el que está en uso se aparta a `.old` y se borra en el siguiente arranque; si era el shell, la barra se reinicia ya con la versión nueva). En **Configuración › Acerca de › Actualizaciones** están la versión instalada, el botón de buscar ahora, el interruptor de comprobación automática al arrancar y cada cuántos días se comprueba. La comprobación automática va en un hilo de baja prioridad y solo avisa: no instala nada sin permiso. Todo con WinHTTP y BCrypt por FFI propia, sin dependencias nuevas.
+
+          **La Configuración original de Windows 11 ya se abre de verdad con OptimizedShell como shell** (corregido en 0.6.0): los enlaces `ms-settings:` seguían sin abrir nada cuando no había un `explorer.exe` de sesión, porque `ShellExecuteW` resuelve los protocolos de las aplicaciones empaquetadas apoyándose en el shell del sistema. Ahora la Configuración se activa directamente con `IApplicationActivationManager`, que vive en un servidor COM propio de Windows y funciona sin Explorador; si eso falla, se prueba `SystemSettings.exe` de `%WinDir%\ImmersiveControlPanel` y, como último recurso, `explorer.exe`. Afecta a la Configuración propia, al área de notificación y a los clics en volumen, red, Bluetooth y batería.
+
+          **Licencia GPL-3.0-or-later**: el código se publica bajo la Licencia Pública General de GNU v3 o posterior (`LICENSE`), y el repositorio es público.
 
           Los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini` y se aplican en caliente.
 

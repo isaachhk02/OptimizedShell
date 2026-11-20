@@ -1,8 +1,10 @@
 [package]
 name = "optimized-shell"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 description = "OptimizedShell: shell ligero para Windows (port a Rust, mínimo consumo)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/isaachhk02/OptimizedShell"
 build = "build.rs"
 
 [[bin]]

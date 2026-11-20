@@ -59,6 +59,7 @@ enum InfoKind {
     Bluetooth,
     Audio,
     Archivo,
+    Version,
 }
 
 #[derive(Clone, Copy)]
@@ -365,6 +366,17 @@ static ACERCA: &[Group] = &[
     Group { title: "Especificaciones de Windows", rows: &[
         Row::Info(InfoKind::Windows),
     ]},
+    Group { title: "Actualizaciones", rows: &[
+        Row::Info(InfoKind::Version),
+        Row::S(Id::ActualizarAuto),
+        Row::S(Id::ActualizarCadaDias),
+        Row::Link { glyph: "\u{E896}", title: "Buscar actualizaciones ahora",
+                    sub: "Consulta las versiones publicadas en GitHub e instala la última",
+                    act: Act::Own("--update") },
+        Row::Link { glyph: "\u{E8A7}", title: "Ver las versiones publicadas",
+                    sub: "Notas de cada versión en GitHub",
+                    act: Act::Url("https://github.com/isaachhk02/OptimizedShell/releases") },
+    ]},
     Group { title: "OptimizedShell", rows: &[
         Row::Info(InfoKind::Archivo),
         Row::Link { glyph: "\u{E8A5}", title: "Abrir config.ini",
@@ -407,7 +419,7 @@ static NAV: &[NavPage] = &[
         arg: "accesibilidad", reset: None, groups: ACCESIBILIDAD },
     NavPage { glyph: "\u{E946}", title: "Acerca de",
         sub: "Información del equipo y de OptimizedShell",
-        arg: "acerca", reset: None, groups: ACERCA },
+        arg: "acerca", reset: Some(Page::Actualizaciones), groups: ACERCA },
 ];
 
 /// Alias admitidos por compatibilidad con los argumentos antiguos.
@@ -919,6 +931,8 @@ fn info_row(info: &SysInfo, kind: InfoKind) -> (&'static str, &'static str, Stri
         InfoKind::Bluetooth => ("\u{E702}", "Bluetooth", info.bluetooth.clone()),
         InfoKind::Audio => ("\u{E767}", "Salida de audio", info.audio.clone()),
         InfoKind::Archivo => ("\u{E8A5}", "Archivo de configuración", info.archivo.clone()),
+        InfoKind::Version => ("\u{E895}", "Versión instalada",
+                              format!("OptimizedShell {}", crate::update::current_version())),
     }
 }
 

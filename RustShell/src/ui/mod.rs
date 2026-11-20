@@ -193,46 +193,150 @@ pub fn set_clipboard_text(text: &str) -> bool {
 /// Abre algo con el shell de Windows: un protocolo (`ms-settings:display`),
 /// un ejecutable (`control.exe`), una carpeta o un archivo.
 ///
-/// Dos detalles importantes para que la Configuración original de Windows 11
-/// (`ms-settings:`, que es una aplicación empaquetada) se abra desde aquí:
+/// La Configuración de Windows 11 (`ms-settings:`) es una aplicación
+/// empaquetada (UWP), y abrirla tiene tres requisitos que no se cumplen solos
+/// cuando OptimizedShell es el shell del usuario:
 ///
-/// 1. La activación de aplicaciones empaquetadas pasa por COM, así que el hilo
-///    que llama tiene que estar inicializado. OptimizedShell dibuja con Win32
-///    puro y no inicializa COM en sus hilos de UI, de modo que
-///    `ShellExecuteW("ms-settings:...")` fallaba en silencio. Se inicializa
-///    aquí, una vez por hilo (si ya lo estaba, el error se ignora).
-/// 2. Si aun así falla —el caso típico cuando OptimizedShell es el shell y no
-///    hay un `explorer.exe` de sesión que atienda la activación— se reintenta
-///    pasándole el objetivo a `explorer.exe`, que sí sabe activar el protocolo.
+/// 1. La activación pasa por COM, así que el hilo que llama tiene que estar
+///    inicializado. OptimizedShell dibuja con Win32 puro y no inicializa COM
+///    en sus hilos de interfaz, de modo que `ShellExecuteW` fallaba en
+///    silencio.
+/// 2. `ShellExecuteW` resuelve los protocolos de las aplicaciones empaquetadas
+///    apoyándose en el shell de la sesión: sin un `explorer.exe` en ejecución
+///    no hay quien atienda la activación y la llamada no abre nada, que es
+///    justo el caso que nos ocupa. Por eso aquí se activa la aplicación
+///    directamente con `IApplicationActivationManager` (CLSID 45BA127D-...),
+///    que vive en un servidor COM propio del sistema y funciona sin
+///    Explorador.
+/// 3. Si tampoco se puede, queda lanzar `SystemSettings.exe` de
+///    `%WinDir%\ImmersiveControlPanel`, y como último recurso reintentar vía
+///    `explorer.exe`.
 ///
 /// Devuelve `true` si algo se ha llegado a lanzar.
 pub fn shell_open(target: &str) -> bool {
-    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    com_init();
 
+    // Las aplicaciones empaquetadas (ms-settings:...) van por la vía de
+    // activación, que no necesita Explorador.
+    if let Some(aumid) = packaged_app_for(target) {
+        if activate_app(aumid, target) {
+            return true;
+        }
+    }
+
+    if shell_execute(target, None) {
+        return true;
+    }
+
+    // La Configuración, a pelo: el ejecutable de la propia aplicación.
+    if target.to_ascii_lowercase().starts_with("ms-settings:") {
+        let win = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let exe = format!("{}\\ImmersiveControlPanel\\SystemSettings.exe",
+                          win.trim_end_matches('\\'));
+        if std::path::Path::new(&exe).exists() && shell_execute(&exe, None) {
+            return true;
+        }
+    }
+
+    // Último recurso: que lo abra explorer.exe (protocolos y shell:AppsFolder\...).
+    shell_execute("explorer.exe", Some(target))
+}
+
+/// Inicializa COM en este hilo una sola vez (si ya lo estaba, se ignora).
+pub fn com_init() {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     thread_local! {
         static COM: () = {
             unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
         };
     }
     COM.with(|_| ());
+}
 
+fn shell_execute(file: &str, params: Option<&str>) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let open = wide("open");
-    let t = wide(target);
+    let f = wide(file);
+    let p = params.map(wide);
+    let pp = p.as_ref().map(|v| v.as_ptr()).unwrap_or(std::ptr::null());
     // ShellExecuteW devuelve un "pseudo-HINSTANCE": <= 32 significa error.
     let r = unsafe {
-        ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), t.as_ptr(),
-                      std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
-    };
-    if r as isize > 32 {
-        return true;
-    }
-    // Reintento vía explorer.exe (protocolos y shell:AppsFolder\...).
-    let exp = wide("explorer.exe");
-    let r = unsafe {
-        ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), exp.as_ptr(),
-                      t.as_ptr(), std::ptr::null(), SW_SHOWNORMAL)
+        ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), f.as_ptr(), pp,
+                      std::ptr::null(), SW_SHOWNORMAL)
     };
     r as isize > 32
+}
+
+/// Identificador (AUMID) de la aplicación empaquetada que atiende el
+/// protocolo, para los protocolos del sistema que nos interesan.
+fn packaged_app_for(target: &str) -> Option<&'static str> {
+    const SETTINGS: &str =
+        "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+    let t = target.to_ascii_lowercase();
+    if t.starts_with("ms-settings:") || t.starts_with("ms-availablenetworks:") {
+        Some(SETTINGS)
+    } else {
+        None
+    }
+}
+
+// IApplicationActivationManager, llamado por el vtable a mano: windows-sys no
+// trae envoltorios de COM y solo hace falta un método.
+type ComFn = unsafe extern "system" fn();
+const V_RELEASE: usize = 2;
+const V_ACTIVATE_APPLICATION: usize = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Guid {
+    a: u32,
+    b: u16,
+    c: u16,
+    d: [u8; 8],
+}
+
+// {45BA127D-10A8-46EA-8AB7-56EA9078943C} CLSID_ApplicationActivationManager
+const CLSID_AAM: Guid = Guid {
+    a: 0x45BA_127D, b: 0x10A8, c: 0x46EA,
+    d: [0x8A, 0xB7, 0x56, 0xEA, 0x90, 0x78, 0x94, 0x3C],
+};
+// {2E941141-7F97-4756-BA1D-9DECDE894A3D} IID_IApplicationActivationManager
+const IID_AAM: Guid = Guid {
+    a: 0x2E94_1141, b: 0x7F97, c: 0x4756,
+    d: [0xBA, 0x1D, 0x9D, 0xEC, 0xDE, 0x89, 0x4A, 0x3D],
+};
+
+/// Activa una aplicación empaquetada pasándole la URI completa como argumento,
+/// que es lo que la Configuración espera para abrir una página concreta.
+fn activate_app(aumid: &str, uri: &str) -> bool {
+    use windows_sys::Win32::System::Com::{CoCreateInstance, CLSCTX_LOCAL_SERVER};
+    unsafe {
+        let mut obj: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(&CLSID_AAM as *const _ as *const _, std::ptr::null_mut(),
+                                  CLSCTX_LOCAL_SERVER, &IID_AAM as *const _ as *const _,
+                                  &mut obj);
+        if hr < 0 || obj.is_null() {
+            return false;
+        }
+        let vt = *(obj as *mut *const *const ComFn);
+        let app = wide(aumid);
+        let arg = wide(uri);
+        let mut pid: u32 = 0;
+
+        // ActivateApplication(appUserModelId, arguments, options, &pid)
+        let activate: unsafe extern "system" fn(
+            *mut std::ffi::c_void, *const u16, *const u16, u32, *mut u32) -> i32 =
+            std::mem::transmute(*vt.add(V_ACTIVATE_APPLICATION));
+        let mut ok = activate(obj, app.as_ptr(), arg.as_ptr(), 0, &mut pid) >= 0;
+        if !ok {
+            // Sin argumentos se abre al menos la portada de la Configuración.
+            ok = activate(obj, app.as_ptr(), std::ptr::null(), 0, &mut pid) >= 0;
+        }
+
+        let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
+            std::mem::transmute(*vt.add(V_RELEASE));
+        release(obj);
+        ok
+    }
 }

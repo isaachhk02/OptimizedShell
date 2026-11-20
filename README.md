@@ -16,6 +16,7 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
 | Configuración | `--settings [inicio\|sistema\|bluetooth\|red\|personalizacion\|barra\|menu\|aplicaciones\|accesibilidad\|acerca]` | Configuración del sistema al estilo de Windows 11: buscador, categorías, información del equipo y accesos a las páginas de Windows |
 | Notificación | `--notify "Título\|Mensaje" [--ok\|--aviso\|--error] [--app <nombre>]` | Manda un aviso a la barra de tareas en ejecución (para scripts y tareas programadas) |
 | Instalación | `--install` · `--uninstall` | Usa OptimizedShell como shell del usuario actual, o vuelve a Explorer |
+| Actualización | `--update [--silent\|--forzar]` | Busca la última release en GitHub, comprueba su SHA-256 y sustituye el ejecutable |
 
 ## Escritorio y atajos
 
@@ -138,6 +139,36 @@ dibuja recorriendo esa tabla, así que **añadir un ajuste es añadir una fila**
   formatos) cacheados por hilo.
 - **EcoQoS** y `EmptyWorkingSet` para reducir el consumo del propio proceso.
 
+## Actualizaciones
+
+OptimizedShell se actualiza solo desde las releases de GitHub
+([isaachhk02/OptimizedShell](https://github.com/isaachhk02/OptimizedShell/releases)),
+sin instalador ni dependencias: baja el `OptimizedShell.exe` publicado, comprueba
+su SHA-256 contra el `.sha256` de la misma release y sustituye el ejecutable.
+
+| Comando | Qué hace |
+|---|---|
+| `--update` | Busca la última versión, pregunta y la instala |
+| `--update --silent` | Busca en silencio y solo avisa con una notificación |
+| `--update --forzar` | Reinstala la última versión aunque ya esté puesta |
+
+También está en **Configuración › Acerca de › Actualizaciones**, con la versión
+instalada, el interruptor de comprobación automática y cada cuántos días se
+comprueba (`[Actualizaciones]` del `config.ini`). La comprobación automática se
+hace en un hilo de baja prioridad al arrancar la barra de tareas y nunca
+instala nada por su cuenta: solo avisa de que hay una versión nueva.
+
+Como un ejecutable en uso no se puede borrar pero sí renombrar, el que está
+corriendo se aparta a `OptimizedShell.exe.old` (se borra en el siguiente
+arranque), el nuevo ocupa su sitio y, si era el shell, la barra se reinicia ya
+con la versión nueva.
+
+El repositorio es público, así que no hace falta ninguna credencial. Si se
+agota el límite de peticiones anónimas de la API de GitHub (60 por hora), se
+puede dejar un token de solo lectura en una línea en
+`%APPDATA%\OptimizedShell\github.token` o en la variable de entorno
+`OPTIMIZEDSHELL_TOKEN`.
+
 ## Compilación
 
 Requiere la toolchain de Rust con el target `x86_64-pc-windows-msvc`:
@@ -250,3 +281,12 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 - Administrador de tareas: columna de E/S real por proceso (ahora es 0) y
   árbol de procesos padre/hijo.
 - Varios monitores: la barra y el escritorio solo se dibujan en el principal.
+
+## Licencia
+
+OptimizedShell se distribuye bajo la **Licencia Pública General de GNU, versión 3
+o posterior** (GPL-3.0-or-later). El texto completo está en [LICENSE](LICENSE).
+
+Esto significa que se puede usar, estudiar, modificar y redistribuir
+libremente, siempre que el código derivado se publique con la misma licencia.
+Se entrega sin ninguna garantía, en los términos que explica la propia licencia.

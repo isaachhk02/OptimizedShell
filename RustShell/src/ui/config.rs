@@ -121,9 +121,12 @@ pub enum Id {
     EscritorioOrden,
     EscritorioOcultos,
     EscritorioAutoRefresco,
+    // Actualizaciones
+    ActualizarAuto,
+    ActualizarCadaDias,
 }
 
-pub const COUNT: usize = Id::EscritorioAutoRefresco as usize + 1;
+pub const COUNT: usize = Id::ActualizarCadaDias as usize + 1;
 
 /// Página de la ventana de Configuración a la que pertenece cada ajuste.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -136,6 +139,7 @@ pub enum Page {
     Bandeja = 5,
     Notificaciones = 6,
     Escritorio = 7,
+    Actualizaciones = 8,
 }
 
 #[derive(Clone, Copy)]
@@ -192,6 +196,7 @@ const RENDIMIENTO: &str = "Rendimiento";
 const BANDEJA: &str = "Bandeja";
 const NOTIFICACIONES: &str = "Notificaciones";
 const ESCRITORIO: &str = "Escritorio";
+const ACTUALIZACIONES: &str = "Actualizaciones";
 
 /// Tabla de ajustes. **El orden debe coincidir con el de `Id`.**
 pub static ITEMS: &[Item] = &[
@@ -489,6 +494,15 @@ pub static ITEMS: &[Item] = &[
         label: "Actualizar los iconos solos",
         help: "Vigila las carpetas Escritorio y relee cuando algo cambia.",
         kind: Kind::Bool, def: 1 },
+    // ------------------------------------------------------ actualizaciones
+    Item { id: Id::ActualizarAuto, page: Page::Actualizaciones, section: ACTUALIZACIONES,
+        key: "Automaticas", label: "Buscar actualizaciones automáticamente",
+        help: "Consulta las versiones publicadas en GitHub al iniciar y avisa si hay una nueva. No instala nada sin permiso.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::ActualizarCadaDias, page: Page::Actualizaciones, section: ACTUALIZACIONES,
+        key: "CadaDias", label: "Cada",
+        help: "Días que pasan entre una comprobación y la siguiente.",
+        kind: Kind::Int { min: 1, max: 30, step: 1, unit: " días" }, def: 1 },
 ];
 
 pub fn item(id: Id) -> &'static Item {
