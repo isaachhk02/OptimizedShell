@@ -957,24 +957,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                             }
                         }
                         tray::Kind::Volume => {
-                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
-                                          ui::wide("ms-settings:sound").as_ptr(), std::ptr::null(),
-                                          std::ptr::null(), SW_SHOWNORMAL);
+                            ui::shell_open("ms-settings:sound");
                         }
                         tray::Kind::Net => {
-                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
-                                          ui::wide("ms-settings:network-status").as_ptr(),
-                                          std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+                            ui::shell_open("ms-settings:network-status");
                         }
                         tray::Kind::Bluetooth => {
-                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
-                                          ui::wide("ms-settings:bluetooth").as_ptr(), std::ptr::null(),
-                                          std::ptr::null(), SW_SHOWNORMAL);
+                            ui::shell_open("ms-settings:bluetooth");
                         }
                         tray::Kind::Battery => {
-                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
-                                          ui::wide("ms-settings:powersleep").as_ptr(), std::ptr::null(),
-                                          std::ptr::null(), SW_SHOWNORMAL);
+                            ui::shell_open("ms-settings:powersleep");
                         }
                         tray::Kind::Bell => launch_own("--settings notificaciones"),
                     }

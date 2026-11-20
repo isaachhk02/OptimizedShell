@@ -188,3 +188,51 @@ pub fn trim_working_set() {
 pub fn set_clipboard_text(text: &str) -> bool {
     clipboard::set_text(text)
 }
+
+// ------------------------------------------------------------ abrir con el shell
+/// Abre algo con el shell de Windows: un protocolo (`ms-settings:display`),
+/// un ejecutable (`control.exe`), una carpeta o un archivo.
+///
+/// Dos detalles importantes para que la Configuración original de Windows 11
+/// (`ms-settings:`, que es una aplicación empaquetada) se abra desde aquí:
+///
+/// 1. La activación de aplicaciones empaquetadas pasa por COM, así que el hilo
+///    que llama tiene que estar inicializado. OptimizedShell dibuja con Win32
+///    puro y no inicializa COM en sus hilos de UI, de modo que
+///    `ShellExecuteW("ms-settings:...")` fallaba en silencio. Se inicializa
+///    aquí, una vez por hilo (si ya lo estaba, el error se ignora).
+/// 2. Si aun así falla —el caso típico cuando OptimizedShell es el shell y no
+///    hay un `explorer.exe` de sesión que atienda la activación— se reintenta
+///    pasándole el objetivo a `explorer.exe`, que sí sabe activar el protocolo.
+///
+/// Devuelve `true` si algo se ha llegado a lanzar.
+pub fn shell_open(target: &str) -> bool {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    thread_local! {
+        static COM: () = {
+            unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        };
+    }
+    COM.with(|_| ());
+
+    let open = wide("open");
+    let t = wide(target);
+    // ShellExecuteW devuelve un "pseudo-HINSTANCE": <= 32 significa error.
+    let r = unsafe {
+        ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), t.as_ptr(),
+                      std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+    };
+    if r as isize > 32 {
+        return true;
+    }
+    // Reintento vía explorer.exe (protocolos y shell:AppsFolder\...).
+    let exp = wide("explorer.exe");
+    let r = unsafe {
+        ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), exp.as_ptr(),
+                      t.as_ptr(), std::ptr::null(), SW_SHOWNORMAL)
+    };
+    r as isize > 32
+}

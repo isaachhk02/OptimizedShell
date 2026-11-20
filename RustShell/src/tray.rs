@@ -18,7 +18,6 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPA
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::notify;
@@ -607,10 +606,7 @@ fn quick_btn(g: &Gfx, s: &theme::Style, r: RECT, glyph: &str, label: &str, hov: 
 }
 
 fn open_url(target: &str) {
-    unsafe {
-        ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide(target).as_ptr(),
-                      std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
-    }
+    ui::shell_open(target);
 }
 
 fn quick_hit(q: &Quick, x: i32, y: i32) -> QHit {

@@ -25,7 +25,6 @@ use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORY
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT, VK_UP,
 };
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::args;
@@ -1714,10 +1713,7 @@ fn nudge(st: &mut State, id: Id, dir: i32) {
 }
 
 fn open_with_shell(target: &str) {
-    unsafe {
-        ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide(target).as_ptr(),
-                      std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
-    }
+    ui::shell_open(target);
 }
 
 fn open_ini() {
