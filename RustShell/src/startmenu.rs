@@ -62,6 +62,8 @@ struct Menu {
     view: Vec<usize>,
     /// Lista completa (true) o solo los frecuentes (false).
     all_mode: bool,
+    /// Cuántas de las primeras filas de `view` son programas anclados.
+    pinned_count: usize,
     filter: String,
     sel: isize,
     scroll: i32,
@@ -178,8 +180,24 @@ fn rebuild_view(m: &mut Menu) {
     } else if m.all_mode {
         m.view = (0..m.apps.len()).collect();
     } else {
+        // Primera pantalla: anclados arriba y, debajo, los más usados que no
+        // estén ya anclados.
+        let pinned = apps::pinned_indices(&m.apps);
         let n = config::current().get(Id::MenuFrecuentes).max(0) as usize;
-        m.view = apps::frequent(&m.apps, n);
+        let mut v = pinned.clone();
+        for i in apps::frequent(&m.apps, n + pinned.len()) {
+            if v.len() >= n + pinned.len() {
+                break;
+            }
+            if !pinned.contains(&i) {
+                v.push(i);
+            }
+        }
+        m.pinned_count = pinned.len();
+        m.view = v;
+    }
+    if m.all_mode || !m.filter.trim().is_empty() {
+        m.pinned_count = 0;
     }
     m.scroll = 0;
     m.sel = if m.view.is_empty() { -1 } else { 0 };
@@ -302,6 +320,8 @@ fn paint(hwnd: HWND, m: &Menu) {
             format!("Resultados ({})", m.view.len())
         } else if m.all_mode {
             format!("Todos los programas ({})", m.view.len())
+        } else if m.pinned_count > 0 {
+            "Anclados y frecuentes".to_string()
         } else {
             "Programas frecuentes".to_string()
         };
@@ -336,8 +356,19 @@ fn paint(hwnd: HWND, m: &Menu) {
                 }
                 tx = rr.left + ui::s(8) + size + ui::s(10);
             }
-            g.text_in(&a.name, tx as f32, rr.top as f32, (rr.right - tx - ui::s(8)) as f32, ih as f32,
+            // Chincheta en los anclados (y en cualquier fila que lo esté).
+            let is_pinned = if idx < m.pinned_count {
+                true
+            } else {
+                apps::is_pinned(&a.path)
+            };
+            let name_w = rr.right - tx - ui::s(8) - if is_pinned { ui::s(18) } else { 0 };
+            g.text_in(&a.name, tx as f32, rr.top as f32, name_w as f32, ih as f32,
                       12.0, false, s.text, Align::Near, Align::Center, false);
+            if is_pinned {
+                g.text_in("\u{E718}", (rr.right - ui::s(22)) as f32, rr.top as f32, ui::s(16) as f32,
+                          ih as f32, 8.5, false, s.accent, Align::Center, Align::Center, true);
+            }
         }
         if m.view.is_empty() {
             let msg = if m.filter.is_empty() {
@@ -444,6 +475,47 @@ fn click(hwnd: HWND, m: &mut Menu, x: i32, y: i32) {
     }
 }
 
+/// Menú contextual de un programa de la lista.
+fn app_menu(hwnd: HWND, m: &mut Menu, app: &apps::App, x: i32, y: i32) {
+    let pinned = apps::is_pinned(&app.path);
+    let items = vec![
+        ui::menu::Item::header(&app.name),
+        ui::menu::Item::new(1, "Abrir").glyph("\u{E8E5}"),
+        ui::menu::Item::new(2, "Ejecutar como administrador").glyph("\u{E7EF}"),
+        ui::menu::Item::sep(),
+        ui::menu::Item::new(3, if pinned { "Desanclar de Inicio" } else { "Anclar a Inicio" })
+            .glyph("\u{E718}")
+            .checked(pinned),
+        ui::menu::Item::new(4, "Abrir ubicación del archivo").glyph("\u{E8DA}"),
+        ui::menu::Item::new(5, "Copiar ruta").glyph("\u{E8C8}"),
+    ];
+    match ui::menu::popup(hwnd, x, y, items) {
+        1 => {
+            unsafe { ShowWindow(hwnd, SW_HIDE) };
+            apps::launch(&app.path);
+        }
+        2 => {
+            unsafe { ShowWindow(hwnd, SW_HIDE) };
+            apps::launch_elevated(&app.path);
+        }
+        3 => {
+            apps::toggle_pin(&app.path);
+            rebuild_view(m);
+            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        }
+        4 => {
+            if let Some(dir) = apps::parent_dir(&app.path) {
+                unsafe { ShowWindow(hwnd, SW_HIDE) };
+                crate::shell::launch_own(&format!("--explorer {}", dir));
+            }
+        }
+        5 => {
+            ui::set_clipboard_text(&app.path);
+        }
+        _ => {}
+    }
+}
+
 fn scroll_by(m: &mut Menu, delta: i32) {
     let vis = m.rows.len() as i32;
     let max = (m.view.len() as i32 - vis).max(0);
@@ -507,6 +579,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let m = &mut *m_ptr;
                 let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
                 click(hwnd, m, x, y);
+            }
+            0
+        }
+        WM_RBUTTONUP => {
+            // Menú del programa: anclar, abrir ubicación, ejecutar como admin.
+            if !m_ptr.is_null() {
+                let m = &mut *m_ptr;
+                let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+                if let Hit::Row(row) = hit(m, x, y) {
+                    let idx = m.scroll as usize + row;
+                    if let Some(&ai) = m.view.get(idx) {
+                        m.sel = idx as isize;
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                        let app = m.apps[ai].clone();
+                        let mut pt = windows_sys::Win32::Foundation::POINT { x, y };
+                        windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+                        app_menu(hwnd, m, &app, pt.x, pt.y);
+                    }
+                }
             }
             0
         }
@@ -635,6 +726,7 @@ pub fn create(hinst: windows_sys::Win32::Foundation::HINSTANCE) -> HWND {
             apps: Vec::new(),
             view: Vec::new(),
             all_mode: false,
+            pinned_count: 0,
             filter: String::new(),
             sel: -1,
             scroll: 0,

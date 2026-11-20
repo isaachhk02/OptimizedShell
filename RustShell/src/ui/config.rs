@@ -96,9 +96,20 @@ pub enum Id {
     NotifPosicion,
     NotifHistorial,
     NotifSonido,
+    // Administrador de tareas y explorador (segunda tanda)
+    TaskmgrIconos,
+    ExplIconos,
+    ExplConfirmarBorrado,
+    ExplAutoRefresco,
+    // Escritorio
+    EscritorioActivo,
+    EscritorioAjuste,
+    EscritorioColor,
+    HotkeysActivas,
+    BandejaIconosApps,
 }
 
-pub const COUNT: usize = Id::NotifSonido as usize + 1;
+pub const COUNT: usize = Id::BandejaIconosApps as usize + 1;
 
 /// Página de la ventana de Configuración a la que pertenece cada ajuste.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,6 +121,7 @@ pub enum Page {
     Rendimiento = 4,
     Bandeja = 5,
     Notificaciones = 6,
+    Escritorio = 7,
 }
 
 #[derive(Clone, Copy)]
@@ -155,6 +167,7 @@ const POSICIONES: &[&str] = &["Abajo", "Arriba"];
 const ALINEACIONES: &[&str] = &["Izquierda", "Centro"];
 const ICONOS_INICIO: &[&str] = &["Glifo", "shell32.dll", "imageres.dll", "Dibujado"];
 const ESQUINAS_NOTIF: &[&str] = &["Derecha", "Izquierda", "Centro"];
+const AJUSTES_FONDO: &[&str] = &["Rellenar", "Ajustar", "Expandir", "Mosaico", "Centrar"];
 
 const APARIENCIA: &str = "Apariencia";
 const BARRA: &str = "BarraDeTareas";
@@ -163,6 +176,7 @@ const LISTAS: &str = "Listas";
 const RENDIMIENTO: &str = "Rendimiento";
 const BANDEJA: &str = "Bandeja";
 const NOTIFICACIONES: &str = "Notificaciones";
+const ESCRITORIO: &str = "Escritorio";
 
 /// Tabla de ajustes. **El orden debe coincidir con el de `Id`.**
 pub static ITEMS: &[Item] = &[
@@ -381,6 +395,43 @@ pub static ITEMS: &[Item] = &[
         kind: Kind::Int { min: 0, max: 100, step: 5, unit: "" }, def: 30 },
     Item { id: Id::NotifSonido, page: Page::Notificaciones, section: NOTIFICACIONES, key: "Sonido",
         label: "Sonido al llegar un aviso", help: "Usa el sonido de notificación del sistema.",
+        kind: Kind::Bool, def: 1 },
+    // ------------------------------------- administrador de tareas y explorador
+    Item { id: Id::TaskmgrIconos, page: Page::Listas, section: LISTAS, key: "IconosProcesos",
+        label: "Iconos en la lista de procesos",
+        help: "Solo se piden para las filas visibles, y se guardan en caché.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::ExplIconos, page: Page::Listas, section: LISTAS, key: "IconosExplorador",
+        label: "Iconos reales en el explorador",
+        help: "El icono que el shell asocia a cada tipo de archivo.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::ExplConfirmarBorrado, page: Page::Listas, section: LISTAS, key: "ConfirmarBorrado",
+        label: "Confirmar al eliminar",
+        help: "Los archivos van a la Papelera salvo que se use Mayús+Supr.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::ExplAutoRefresco, page: Page::Listas, section: LISTAS, key: "AutoRefresco",
+        label: "Actualizar la carpeta sola",
+        help: "Vigila los cambios del directorio (ReadDirectoryChangesW).",
+        kind: Kind::Bool, def: 1 },
+    // ---------------------------------------------------------- escritorio
+    Item { id: Id::EscritorioActivo, page: Page::Escritorio, section: ESCRITORIO, key: "Activo",
+        label: "Dibujar el escritorio",
+        help: "Ventana de fondo con el papel tapiz. Se omite sola mientras el Explorador de Windows sea el shell.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioAjuste, page: Page::Escritorio, section: ESCRITORIO, key: "Ajuste",
+        label: "Ajuste de la imagen", help: "",
+        kind: Kind::Choice(AJUSTES_FONDO), def: 0 },
+    Item { id: Id::EscritorioColor, page: Page::Escritorio, section: ESCRITORIO, key: "Color",
+        label: "Color de fondo",
+        help: "Se ve cuando no hay imagen o cuando la imagen no cubre toda la pantalla.",
+        kind: Kind::Color, def: 0x10141B },
+    Item { id: Id::HotkeysActivas, page: Page::Escritorio, section: ESCRITORIO, key: "Atajos",
+        label: "Atajos de teclado globales",
+        help: "Win+E explorador, Win+R ejecutar, Win+I configuración, Win+D escritorio, Ctrl+Mayús+Esc administrador.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaIconosApps, page: Page::Bandeja, section: BANDEJA, key: "IconosApps",
+        label: "Iconos de las aplicaciones",
+        help: "Los que publican con Shell_NotifyIcon. Solo llegan si OptimizedShell es el shell.",
         kind: Kind::Bool, def: 1 },
 ];
 

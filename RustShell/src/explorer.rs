@@ -1,30 +1,42 @@
-// Explorador de archivos (--explorer [ruta]). Port de CppShell/src/explorer.cpp.
+// Explorador de archivos (--explorer [ruta]).
 //
-// Primera iteración: marco propio, barra de herramientas (atrás/adelante/arriba/
-// actualizar), ruta actual, panel lateral de accesos (unidades y carpetas del
-// usuario), y lista con columnas Nombre/Fecha/Tipo/Tamaño ordenables. Navegación
-// con doble clic (carpetas) y apertura de archivos (ShellExecute). Las
-// operaciones de archivo COM (IFileOperation, portapapeles, arrastrar y soltar) y
-// el refresco por ReadDirectoryChangesW se añadirán en iteraciones siguientes.
+// Marco propio, barra de herramientas (atrás/adelante/arriba/actualizar), ruta
+// actual, panel lateral de accesos (unidades y carpetas del usuario) y lista
+// con columnas Nombre/Fecha/Tipo/Tamaño ordenables.
+//
+// Las operaciones sobre archivos (copiar, mover, eliminar, renombrar, carpeta
+// nueva) se hacen con `IFileOperation` a través de `fileops`, igual que el
+// Explorador de Windows: papelera, diálogo de progreso, confirmaciones y
+// deshacer. El portapapeles usa CF_HDROP, así que se copia y se pega con el
+// Explorador de Windows indistintamente, y la carpeta se revisa sola con
+// `ReadDirectoryChangesW` (módulo `watcher`).
 #![allow(non_snake_case, non_upper_case_globals)]
 
+use std::collections::HashSet;
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient};
+use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
 use windows_sys::Win32::Storage::FileSystem::{
     FindClose, FindFirstFileW, FindNextFileW, GetLogicalDrives, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_HIDDEN, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_F5, VK_RETURN};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F2, VK_F5, VK_RETURN,
+    VK_SHIFT, VK_UP,
+};
+use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, ShellExecuteW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::args;
+use crate::fileops::{self, Op};
+use crate::ui::clipboard::{self, Effect};
 use crate::ui::gdip::{Align, Chrome, Gfx};
 use crate::ui::config::{self, Id};
+use crate::ui::menu;
 use crate::ui::{self, theme, window};
+use crate::watcher::{self, Watcher};
 
 
 /// Alto de fila (configurable en Configuración · Listas).
@@ -64,6 +76,16 @@ struct State {
     items: Vec<usize>, // vista ordenada -> índice en all
     all: Vec<FileItem>,
     sel: isize,
+    /// Filas seleccionadas (índices de `items`), para operar con varias a la vez.
+    marked: HashSet<usize>,
+    /// Ancla de la selección con Mayús.
+    anchor: isize,
+    /// Nombre que se está editando en la fila, si se está renombrando.
+    editing: Option<(usize, String)>,
+    /// Vigilante de la carpeta actual.
+    watch: Option<Watcher>,
+    /// Último mensaje de error de una operación.
+    msg: Option<String>,
     scroll: i32,
     hover: i32,
     hover_row: i32,
@@ -204,12 +226,72 @@ fn navigate(st: &mut State, path: &str, push_history: bool) {
     st.path = p;
     st.all = read_dir(&st.path);
     st.sel = -1;
+    st.marked.clear();
+    st.anchor = -1;
+    st.editing = None;
+    st.msg = None;
     st.scroll = 0;
     rebuild(st);
+    // Se vigila la carpeta nueva y se deja de vigilar la anterior.
+    st.watch = if config::current().b(Id::ExplAutoRefresco) {
+        Watcher::start(&st.path, st.hwnd)
+    } else {
+        None
+    };
     unsafe {
         let title = ui::wide(&format!("{} — Explorador", st.path));
         SetWindowTextW(st.hwnd, title.as_ptr());
     }
+}
+
+/// Relee la carpeta conservando selección y desplazamiento (para el refresco
+/// automático: la lista no debe saltar mientras se mira).
+fn reload_keep_view(st: &mut State) {
+    let selected_names: Vec<String> = selected_items(st)
+        .iter()
+        .map(|i| st.all[*i].name.clone())
+        .collect();
+    let scroll = st.scroll;
+    st.all = read_dir(&st.path);
+    rebuild(st);
+    st.marked.clear();
+    st.sel = -1;
+    for (row, &idx) in st.items.iter().enumerate() {
+        if selected_names.iter().any(|n| *n == st.all[idx].name) {
+            st.marked.insert(row);
+            if st.sel < 0 {
+                st.sel = row as isize;
+            }
+        }
+    }
+    let max = (st.items.len() as i32 - rows_visible(st)).max(0);
+    st.scroll = scroll.clamp(0, max);
+}
+
+/// Índices en `all` de lo que está seleccionado.
+fn selected_items(st: &State) -> Vec<usize> {
+    let mut v: Vec<usize> = st.marked.iter().filter_map(|&r| st.items.get(r).copied()).collect();
+    if v.is_empty() {
+        if let Some(&i) = st.items.get(st.sel.max(0) as usize) {
+            if st.sel >= 0 {
+                v.push(i);
+            }
+        }
+    }
+    v
+}
+
+/// Rutas completas de lo seleccionado.
+fn selected_paths(st: &State) -> Vec<String> {
+    let base = st.path.trim_end_matches('\\');
+    selected_items(st)
+        .iter()
+        .map(|&i| format!("{}\\{}", base, st.all[i].name))
+        .collect()
+}
+
+fn full_path(st: &State, idx_in_all: usize) -> String {
+    format!("{}\\{}", st.path.trim_end_matches('\\'), st.all[idx_in_all].name)
 }
 
 fn parent(path: &str) -> Option<String> {
@@ -362,15 +444,51 @@ fn paint(st: &State) {
             let ry = st.list_rc.top + row * row_h();
             let rr_x = st.list_rc.left + ui::s(2);
             let rr_w = st.list_rc.right - rr_x;
-            if idx as isize == st.sel {
-                g.rounded(rr_x as f32, ry as f32, rr_w as f32, (row_h() - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_selected), None);
+            let rr_h = row_h() - ui::s(2);
+            let marked = st.marked.contains(&idx);
+            if marked {
+                g.rounded(rr_x as f32, ry as f32, rr_w as f32, rr_h as f32, ui::sf(5.0), Some(s.row_selected), None);
+                if idx as isize == st.sel {
+                    // La fila con el foco lleva además un borde fino.
+                    g.rounded(rr_x as f32, ry as f32, rr_w as f32, rr_h as f32, ui::sf(5.0), None,
+                              Some((s.focus_ring, 1.0)));
+                }
             } else if row == st.hover_row {
-                g.rounded(rr_x as f32, ry as f32, rr_w as f32, (row_h() - ui::s(2)) as f32, ui::sf(5.0), Some(s.row_hover), None);
+                g.rounded(rr_x as f32, ry as f32, rr_w as f32, rr_h as f32, ui::sf(5.0), Some(s.row_hover), None);
             }
             let fg = if it.hidden { s.text_dim } else { s.text };
-            // icono (glifo carpeta/archivo)
-            g.text_in(if it.is_dir { "\u{E8B7}" } else { "\u{E7C3}" }, st.col_x[0] as f32, ry as f32, ui::s(18) as f32, (row_h() - ui::s(2)) as f32, 12.0, false, if it.is_dir { s.accent } else { s.text_dim }, Align::Near, Align::Center, true);
-            g.text_in(&it.name, (st.col_x[0] + ui::s(24)) as f32, ry as f32, (st.col_x[1] - st.col_x[0] - ui::s(28)) as f32, (row_h() - ui::s(2)) as f32, 12.0, false, fg, Align::Near, Align::Center, false);
+            // Icono real del shell si está activado; si no, un glifo.
+            let isz = ui::s(18);
+            let drew_icon = if config::current().b(Id::ExplIconos) {
+                let hicon = crate::apps::icon(&format!("{}\\{}", st.path.trim_end_matches('\\'), it.name));
+                if hicon.is_null() {
+                    false
+                } else {
+                    g.draw_hicon(hicon, st.col_x[0], ry + (rr_h - isz) / 2, isz);
+                    true
+                }
+            } else {
+                false
+            };
+            if !drew_icon {
+                g.text_in(if it.is_dir { "\u{E8B7}" } else { "\u{E7C3}" }, st.col_x[0] as f32, ry as f32, isz as f32, rr_h as f32, 12.0, false, if it.is_dir { s.accent } else { s.text_dim }, Align::Near, Align::Center, true);
+            }
+            // Nombre, o el cuadro de edición si se está renombrando esta fila.
+            let name_x = st.col_x[0] + ui::s(24);
+            let name_w = st.col_x[1] - st.col_x[0] - ui::s(28);
+            match &st.editing {
+                Some((erow, text)) if *erow == idx => {
+                    g.rounded(name_x as f32, (ry + ui::s(1)) as f32, name_w as f32,
+                              (rr_h - ui::s(2)) as f32, ui::sf(4.0), Some(s.control_bg),
+                              Some((s.accent_solid, 1.6)));
+                    g.text_in(text, (name_x + ui::s(6)) as f32, ry as f32, (name_w - ui::s(12)) as f32,
+                              rr_h as f32, 12.0, false, s.text, Align::Near, Align::Center, false);
+                }
+                _ => {
+                    g.text_in(&it.name, name_x as f32, ry as f32, name_w as f32, rr_h as f32, 12.0,
+                              false, fg, Align::Near, Align::Center, false);
+                }
+            }
             if st.col_x[1] != st.col_x[2] {
                 g.text_in(&it.date, (st.col_x[1] + ui::s(2)) as f32, ry as f32, (st.col_x[2] - st.col_x[1] - ui::s(8)) as f32, (row_h() - ui::s(2)) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
             }
@@ -386,8 +504,31 @@ fn paint(st: &State) {
         // barra de estado
         g.hline(0, w, st.status_rc.top, s.separator);
         let n = st.items.len();
-        let status = format!("{} elemento{}", n, if n == 1 { "" } else { "s" });
-        g.text_in(&status, ui::s(12) as f32, st.status_rc.top as f32, (w - ui::s(24)) as f32, (st.status_rc.bottom - st.status_rc.top) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+        let sel = st.marked.len();
+        let status = if sel > 0 {
+            let bytes: u64 = st.marked.iter()
+                .filter_map(|r| st.items.get(*r))
+                .map(|&i| st.all[i].size)
+                .sum();
+            if bytes > 0 {
+                format!("{} de {} seleccionados · {}", sel, n, format_bytes(bytes))
+            } else {
+                format!("{} de {} seleccionados", sel, n)
+            }
+        } else {
+            format!("{} elemento{}", n, if n == 1 { "" } else { "s" })
+        };
+        let sh = st.status_rc.bottom - st.status_rc.top;
+        g.text_in(&status, ui::s(12) as f32, st.status_rc.top as f32, (w / 2) as f32, sh as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+        // Último error de una operación, a la derecha.
+        if let Some(m) = &st.msg {
+            g.text_in(m, (w / 2) as f32, st.status_rc.top as f32, (w / 2 - ui::s(12)) as f32,
+                      sh as f32, 11.0, false, s.danger, Align::Far, Align::Center, false);
+        } else if clipboard::has_files() {
+            g.text_in("Hay archivos en el portapapeles · Ctrl+V para pegar", (w / 2) as f32,
+                      st.status_rc.top as f32, (w / 2 - ui::s(12)) as f32, sh as f32, 11.0, false,
+                      s.text_faint, Align::Far, Align::Center, false);
+        }
     });
 }
 
@@ -454,6 +595,167 @@ fn open_item(st: &mut State, idx: usize) {
             ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide(&full).as_ptr(),
                           std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
         }
+    }
+}
+
+// ------------------------------------------------- operaciones con archivos
+/// Aplica el resultado de una operación: deja el mensaje si falló y relee.
+fn after_op(st: &mut State, r: fileops::OpResult) {
+    st.msg = match r {
+        Ok(_) => None,
+        Err(e) => Some(e),
+    };
+    reload_keep_view(st);
+    unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+}
+
+fn copy_selection(st: &mut State, cut: bool) {
+    let paths = selected_paths(st);
+    if paths.is_empty() {
+        return;
+    }
+    clipboard::set_files(&paths, if cut { Effect::Move } else { Effect::Copy });
+    st.msg = None;
+    unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+}
+
+fn paste_here(st: &mut State) {
+    let Some((paths, effect)) = clipboard::get_files() else { return };
+    let dest = st.path.trim_end_matches('\\').to_string();
+    let kind = if effect == Effect::Move { Op::Move } else { Op::Copy };
+
+    // Lo que ya está en esta carpeta se duplica con otro nombre; cortar y
+    // pegar en el mismo sitio no hace nada, como en Windows.
+    let same_dir = |p: &String| {
+        std::path::Path::new(p)
+            .parent()
+            .map(|d| d.to_string_lossy().trim_end_matches('\\').eq_ignore_ascii_case(&dest))
+            .unwrap_or(false)
+    };
+    let (here, elsewhere): (Vec<String>, Vec<String>) = paths.into_iter().partition(same_dir);
+
+    let mut result: fileops::OpResult = Ok(false);
+    if !elsewhere.is_empty() {
+        result = fileops::transfer(st.hwnd, &elsewhere, &dest, kind);
+    }
+    if kind == Op::Copy {
+        for p in &here {
+            let name = std::path::Path::new(p)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let new_name = fileops::free_copy_name(&dest, &name);
+            let r = fileops::copy_as(st.hwnd, p, &dest, &new_name);
+            if r.is_err() {
+                result = r;
+            }
+        }
+    }
+    after_op(st, result);
+}
+
+fn delete_selection(st: &mut State, permanent: bool) {
+    let paths = selected_paths(st);
+    if paths.is_empty() {
+        return;
+    }
+    // Sin confirmación propia: la pone el shell, que además dice qué se borra.
+    let r = fileops::delete(st.hwnd, &paths, permanent);
+    after_op(st, r);
+}
+
+fn begin_rename(st: &mut State) {
+    let Some(&idx) = st.items.get(st.sel.max(0) as usize) else { return };
+    if st.sel < 0 {
+        return;
+    }
+    st.editing = Some((st.sel as usize, st.all[idx].name.clone()));
+    unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+}
+
+fn commit_rename(st: &mut State) {
+    let Some((row, name)) = st.editing.take() else { return };
+    let Some(&idx) = st.items.get(row) else { return };
+    let old = st.all[idx].name.clone();
+    if name.trim().is_empty() || name == old {
+        unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+        return;
+    }
+    let path = full_path(st, idx);
+    let r = fileops::rename(st.hwnd, &path, &name);
+    after_op(st, r);
+}
+
+fn create_folder(st: &mut State) {
+    // El shell elige un nombre libre («Nueva carpeta», «Nueva carpeta (2)»...).
+    let parent = st.path.clone();
+    let r = fileops::new_folder(st.hwnd, &parent, "Nueva carpeta");
+    after_op(st, r);
+}
+
+/// Menú contextual de la lista. El del shell (con «Abrir con», «Enviar a» y
+/// lo que añadan los programas) se ofrece como una entrada más: es un menú del
+/// sistema y no sigue el tema, así que no se pone por delante del propio.
+fn list_menu(st: &mut State, x: i32, y: i32) {
+    let paths = selected_paths(st);
+    let has_sel = !paths.is_empty();
+    let one = paths.len() == 1;
+    let is_dir = selected_items(st).first().map(|&i| st.all[i].is_dir).unwrap_or(false);
+    let can_paste = clipboard::has_files();
+
+    let items = vec![
+        menu::Item::new(1, if is_dir { "Abrir" } else { "Abrir" })
+            .glyph("\u{E8E5}").enabled(one),
+        menu::Item::new(2, "Abrir en una ventana nueva").glyph("\u{E8A7}").enabled(one && is_dir),
+        menu::Item::sep(),
+        menu::Item::new(3, "Cortar").glyph("\u{E8C6}").enabled(has_sel),
+        menu::Item::new(4, "Copiar").glyph("\u{E8C8}").enabled(has_sel),
+        menu::Item::new(5, "Pegar").glyph("\u{E77F}").enabled(can_paste),
+        menu::Item::sep(),
+        menu::Item::new(6, "Cambiar nombre").glyph("\u{E8AC}").hint("F2").enabled(one),
+        menu::Item::new(7, "Eliminar").glyph("\u{E74D}").hint("Supr").enabled(has_sel).danger(),
+        menu::Item::sep(),
+        menu::Item::new(8, "Carpeta nueva").glyph("\u{E8F4}"),
+        menu::Item::new(9, "Copiar la ruta").glyph("\u{E8C8}").enabled(has_sel),
+        menu::Item::sep(),
+        menu::Item::new(10, "Más opciones de Windows").glyph("\u{E712}").enabled(has_sel),
+        menu::Item::new(11, "Propiedades").glyph("\u{E946}").hint("Alt+Entrar").enabled(one),
+    ];
+    match menu::popup(st.hwnd, x, y, items) {
+        1 => {
+            if st.sel >= 0 {
+                open_item(st, st.sel as usize);
+            }
+        }
+        2 => {
+            if let Some(p) = paths.first() {
+                crate::shell::launch_own(&format!("--explorer {}", p));
+            }
+        }
+        3 => copy_selection(st, true),
+        4 => copy_selection(st, false),
+        5 => paste_here(st),
+        6 => begin_rename(st),
+        7 => delete_selection(st, false),
+        8 => create_folder(st),
+        9 => {
+            ui::set_clipboard_text(&paths.join("\r\n"));
+        }
+        10 => {
+            // El menú del shell, con sus extensiones.
+            fileops::shell_context_menu(st.hwnd, &paths, x, y);
+            reload_keep_view(st);
+            unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+        }
+        11 => {
+            if let Some(p) = paths.first() {
+                fileops::show_properties(st.hwnd, p);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -597,7 +899,106 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 let r = row_at(st, x, y);
                 if r >= 0 {
+                    let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
+                    let shift = GetKeyState(VK_SHIFT as i32) < 0;
+                    let row = r as usize;
+                    if ctrl {
+                        // Añade o quita esta fila de la selección.
+                        if !st.marked.remove(&row) {
+                            st.marked.insert(row);
+                        }
+                        st.anchor = r as isize;
+                    } else if shift && st.anchor >= 0 {
+                        // Rango desde el ancla.
+                        st.marked.clear();
+                        let (a, b) = (st.anchor.min(r as isize), st.anchor.max(r as isize));
+                        for i in a..=b {
+                            st.marked.insert(i as usize);
+                        }
+                    } else {
+                        st.marked.clear();
+                        st.marked.insert(row);
+                        st.anchor = r as isize;
+                    }
                     st.sel = r as isize;
+                    st.editing = None;
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                } else if in_rect(&st.list_rc, x, y) {
+                    // Pulsar el hueco vacío deselecciona.
+                    st.marked.clear();
+                    st.sel = -1;
+                    st.editing = None;
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            0
+        }
+        WM_RBUTTONUP => {
+            if !st_ptr.is_null() {
+                let st = st!();
+                let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+                if in_rect(&st.list_rc, x, y) {
+                    let r = row_at(st, x, y);
+                    if r >= 0 && !st.marked.contains(&(r as usize)) {
+                        st.marked.clear();
+                        st.marked.insert(r as usize);
+                        st.sel = r as isize;
+                        st.anchor = r as isize;
+                    } else if r < 0 {
+                        st.marked.clear();
+                        st.sel = -1;
+                    }
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    let mut pt = POINT { x, y };
+                    ClientToScreen(hwnd, &mut pt);
+                    list_menu(st, pt.x, pt.y);
+                }
+            }
+            0
+        }
+        WM_DROPFILES => {
+            // Arrastrar archivos a la ventana: se copian aquí (o se mueven con Mayús).
+            if !st_ptr.is_null() {
+                let st = st!();
+                let drop = wp as HDROP;
+                let n = DragQueryFileW(drop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
+                let mut paths = Vec::with_capacity(n as usize);
+                for i in 0..n {
+                    let len = DragQueryFileW(drop, i, std::ptr::null_mut(), 0);
+                    if len == 0 {
+                        continue;
+                    }
+                    let mut buf = vec![0u16; len as usize + 1];
+                    DragQueryFileW(drop, i, buf.as_mut_ptr(), buf.len() as u32);
+                    paths.push(from_utf16(&buf));
+                }
+                let mut pt = POINT { x: 0, y: 0 };
+                DragQueryPoint(drop, &mut pt);
+                DragFinish(drop);
+                if !paths.is_empty() {
+                    // Si se suelta sobre una carpeta de la lista, va dentro.
+                    let r = row_at(st, pt.x, pt.y);
+                    let dest = match r {
+                        r if r >= 0 => {
+                            let idx = st.items[r as usize];
+                            if st.all[idx].is_dir { full_path(st, idx) } else { st.path.clone() }
+                        }
+                        _ => st.path.clone(),
+                    };
+                    let shift = GetKeyState(VK_SHIFT as i32) < 0;
+                    let kind = if shift { Op::Move } else { Op::Copy };
+                    let res = fileops::transfer(hwnd, &paths, &dest, kind);
+                    after_op(st, res);
+                }
+            }
+            0
+        }
+        watcher::WM_DIR_CHANGED => {
+            // La carpeta ha cambiado: se relee sin perder la selección.
+            if !st_ptr.is_null() {
+                let st = st!();
+                if st.editing.is_none() {
+                    reload_keep_view(st);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
             }
@@ -624,10 +1025,59 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_CHAR => {
+            // Escribir mientras se renombra.
+            if !st_ptr.is_null() {
+                let st = st!();
+                if let Some((_, name)) = st.editing.as_mut() {
+                    let ch = wp as u32;
+                    if ch == VK_BACK as u32 {
+                        name.pop();
+                    } else if ch >= 0x20 {
+                        if let Some(c) = char::from_u32(ch) {
+                            // Caracteres que Windows no admite en un nombre.
+                            if !r#"\/:*?"<>|"#.contains(c) {
+                                name.push(c);
+                            }
+                        }
+                    }
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            0
+        }
         WM_KEYDOWN => {
             if !st_ptr.is_null() {
                 let st = st!();
                 let vk = wp as u32;
+                let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
+                let shift = GetKeyState(VK_SHIFT as i32) < 0;
+
+                // Mientras se renombra, el teclado es para el nombre.
+                if st.editing.is_some() {
+                    if vk == VK_RETURN as u32 {
+                        commit_rename(st);
+                    } else if vk == VK_ESCAPE as u32 {
+                        st.editing = None;
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                    return 0;
+                }
+                if ctrl {
+                    match vk as u8 as char {
+                        'C' => copy_selection(st, false),
+                        'X' => copy_selection(st, true),
+                        'V' => paste_here(st),
+                        'A' => {
+                            st.marked = (0..st.items.len()).collect();
+                            st.sel = 0;
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
+                        'N' => create_folder(st),
+                        _ => {}
+                    }
+                    return 0;
+                }
                 if vk == VK_BACK as u32 {
                     go_up(st);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -635,8 +1085,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let p = st.path.clone();
                     navigate(st, &p, false);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
+                } else if vk == VK_F2 as u32 {
+                    begin_rename(st);
+                } else if vk == VK_DELETE as u32 {
+                    // Mayús+Supr elimina sin pasar por la papelera.
+                    delete_selection(st, shift);
                 } else if vk == VK_RETURN as u32 && st.sel >= 0 {
                     open_item(st, st.sel as usize);
+                } else if vk == VK_UP as u32 || vk == VK_DOWN as u32 {
+                    let d = if vk == VK_DOWN as u32 { 1 } else { -1 };
+                    let n = st.items.len() as isize;
+                    if n > 0 {
+                        st.sel = (st.sel + d).clamp(0, n - 1);
+                        if !shift {
+                            st.marked.clear();
+                            st.anchor = st.sel;
+                        }
+                        st.marked.insert(st.sel as usize);
+                        // Mantiene la fila a la vista.
+                        let vis = rows_visible(st);
+                        if st.sel < st.scroll as isize {
+                            st.scroll = st.sel as i32;
+                        } else if st.sel >= (st.scroll + vis) as isize {
+                            st.scroll = st.sel as i32 - vis + 1;
+                        }
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
                 }
             }
             0
@@ -707,6 +1181,11 @@ pub fn run() -> i32 {
             items: Vec::new(),
             all: Vec::new(),
             sel: -1,
+            marked: HashSet::new(),
+            anchor: -1,
+            editing: None,
+            watch: None,
+            msg: None,
             scroll: 0,
             hover: B_NONE,
             hover_row: -1,
@@ -727,6 +1206,10 @@ pub fn run() -> i32 {
         });
         let raw = Box::into_raw(st);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize);
+        // COM para IFileOperation y el menú del shell, y arrastrar y soltar.
+        fileops::init_com();
+        ui::menu::register(hinst);
+        DragAcceptFiles(hwnd, 1);
         window::refresh_frame(hwnd);
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         layout(&mut *raw);

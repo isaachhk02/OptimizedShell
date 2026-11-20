@@ -183,3 +183,89 @@ pub fn icon(path: &str) -> HICON {
         hicon
     })
 }
+
+// ------------------------------------------------------------ anclados
+// Los programas anclados se guardan por ruta en pinned.ini, en el orden en que
+// el usuario los ancló: es lo que el menú Inicio enseña arriba del todo.
+fn pinned_file() -> PathBuf {
+    config::config_dir().join("pinned.ini")
+}
+
+/// Rutas ancladas, en orden.
+pub fn pinned() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(pinned_file()) else { return Vec::new() };
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with(';') && !l.starts_with('['))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+fn save_pinned(list: &[String]) {
+    let mut out = String::from("; Programas anclados al menú Inicio de OptimizedShell.\n[Anclados]\n");
+    for p in list {
+        out.push_str(p);
+        out.push('\n');
+    }
+    let _ = std::fs::write(pinned_file(), out);
+}
+
+pub fn is_pinned(path: &str) -> bool {
+    pinned().iter().any(|p| p.eq_ignore_ascii_case(path))
+}
+
+/// Ancla o desancla según el estado actual. Devuelve true si queda anclado.
+pub fn toggle_pin(path: &str) -> bool {
+    let mut list = pinned();
+    match list.iter().position(|p| p.eq_ignore_ascii_case(path)) {
+        Some(i) => {
+            list.remove(i);
+            save_pinned(&list);
+            false
+        }
+        None => {
+            list.push(path.to_string());
+            // Tope razonable: el menú tampoco da para más.
+            if list.len() > 20 {
+                list.remove(0);
+            }
+            save_pinned(&list);
+            true
+        }
+    }
+}
+
+/// Índices de `apps` que están anclados, en el orden del archivo. Las rutas
+/// que ya no existen se ignoran (programa desinstalado).
+pub fn pinned_indices(apps: &[App]) -> Vec<usize> {
+    let pins = pinned();
+    let mut out = Vec::new();
+    for p in pins {
+        if let Some(i) = apps.iter().position(|a| a.path.eq_ignore_ascii_case(&p)) {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Abre un acceso directo pidiendo elevación ("Ejecutar como administrador").
+pub fn launch_elevated(path: &str) {
+    record_use(path);
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            ui::wide("runas").as_ptr(),
+            ui::wide(path).as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Carpeta que contiene el acceso directo (para «Abrir ubicación»).
+pub fn parent_dir(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+}

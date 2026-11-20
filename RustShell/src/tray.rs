@@ -49,6 +49,8 @@ fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
 // ---------------------------------------------------------------- elementos
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    /// Icono publicado por una aplicación con Shell_NotifyIcon (índice en la lista).
+    App(usize),
     Volume,
     Net,
     Bluetooth,
@@ -64,12 +66,15 @@ pub struct Item {
 pub struct Tray {
     pub snap: Snapshot,
     pub items: Vec<Item>,
+    /// Iconos de las aplicaciones (Shell_NotifyIcon), tal y como estaban al
+    /// medir: así el dibujo y los clics ven la misma lista.
+    pub apps: Vec<crate::traynotify::TrayIcon>,
     last_sample: u32,
 }
 
 impl Tray {
     pub fn new() -> Tray {
-        Tray { snap: Snapshot::default(), items: Vec::new(), last_sample: 0 }
+        Tray { snap: Snapshot::default(), items: Vec::new(), apps: Vec::new(), last_sample: 0 }
     }
 
     /// Vuelve a muestrear el estado si ha pasado el intervalo (o si `force`).
@@ -95,6 +100,12 @@ impl Tray {
     fn kinds(&self) -> Vec<Kind> {
         let c = config::current();
         let mut v = Vec::new();
+        // Primero los de las aplicaciones, como en Windows.
+        if c.b(Id::BandejaIconosApps) {
+            for i in 0..self.apps.len() {
+                v.push(Kind::App(i));
+            }
+        }
         if c.b(Id::BandejaSonido) && self.snap.has_audio {
             v.push(Kind::Volume);
         }
@@ -118,8 +129,14 @@ impl Tray {
     pub fn layout(&mut self, right: i32, h: i32) -> i32 {
         self.items.clear();
         if !config::current().b(Id::BandejaMostrar) {
+            self.apps.clear();
             return right;
         }
+        self.apps = if config::current().b(Id::BandejaIconosApps) {
+            crate::traynotify::icons()
+        } else {
+            Vec::new()
+        };
         let iw = ui::s(32);
         let pad = ui::s(4);
         let kinds = self.kinds();
@@ -139,6 +156,8 @@ impl Tray {
 
     fn item_width(&self, k: Kind, base: i32) -> i32 {
         match k {
+            // Los iconos de aplicación son más estrechos: van pegados.
+            Kind::App(_) => ui::s(26),
             // La batería con porcentaje necesita sitio para el texto.
             Kind::Battery if config::current().b(Id::BandejaPorcentajeBateria) && self.snap.battery.percent >= 0 => {
                 base + ui::s(26)
@@ -155,6 +174,7 @@ impl Tray {
     pub fn tooltip(&self, i: usize) -> String {
         let Some(it) = self.items.get(i) else { return String::new() };
         match it.kind {
+            Kind::App(j) => self.apps.get(j).map(|a| a.tip.clone()).unwrap_or_default(),
             Kind::Volume => {
                 if self.snap.muted {
                     "Sonido silenciado".into()
@@ -203,6 +223,12 @@ impl Tray {
             let cx = (r.left + r.right) / 2;
             let cy = (r.top + r.bottom) / 2;
             match it.kind {
+                Kind::App(j) => {
+                    if let Some(a) = self.apps.get(j) {
+                        let sz = ui::s(16);
+                        g.draw_hicon(a.icon, cx - sz / 2, cy - sz / 2, sz);
+                    }
+                }
                 Kind::Volume => {
                     let glyph = if self.snap.muted {
                         "\u{E74F}"
@@ -363,6 +389,11 @@ enum Tile {
 
 struct Quick {
     snap: Snapshot,
+    /// Estado de las radios (None = el equipo no tiene esa radio).
+    wifi: Option<bool>,
+    bluetooth: Option<bool>,
+    /// Mensaje cuando una radio no se deja cambiar.
+    msg: Option<String>,
     tiles: Vec<(Tile, RECT)>,
     vol_track: RECT,
     mute_rc: RECT,
@@ -414,19 +445,31 @@ fn quick_layout(hwnd: HWND, q: &mut Quick) {
 
 fn tile_state(q: &Quick, t: Tile) -> (&'static str, String, bool) {
     match t {
-        Tile::Wifi => match &q.snap.net {
-            Net::Wifi { ssid, .. } => ("\u{E701}", ssid.clone(), true),
-            Net::Ethernet { .. } => ("\u{E701}", "Ethernet".into(), true),
-            Net::Off => ("\u{E701}", "Sin red".into(), false),
+        // El mosaico de Wi-Fi enciende y apaga la radio de verdad; si el
+        // equipo no tiene Wi-Fi enseña la conexión que haya.
+        Tile::Wifi => match q.wifi {
+            Some(true) => match &q.snap.net {
+                Net::Wifi { ssid, .. } => ("\u{E701}", ssid.clone(), true),
+                _ => ("\u{E701}", "Encendido".into(), true),
+            },
+            Some(false) => ("\u{E701}", "Apagado".into(), false),
+            None => match &q.snap.net {
+                Net::Ethernet { .. } => ("\u{E701}", "Ethernet".into(), true),
+                Net::Wifi { ssid, .. } => ("\u{E701}", ssid.clone(), true),
+                Net::Off => ("\u{E701}", "Sin red".into(), false),
+            },
         },
         Tile::Bluetooth => (
             "\u{E702}",
-            match q.snap.bluetooth {
-                Some(true) => "Disponible".into(),
-                Some(false) => "Sin radio".into(),
-                None => "No instalado".into(),
+            match q.bluetooth {
+                Some(true) => "Encendido".into(),
+                Some(false) => "Apagado".into(),
+                None => match q.snap.bluetooth {
+                    Some(true) => "Disponible".into(),
+                    _ => "No instalado".into(),
+                },
             },
-            q.snap.bluetooth == Some(true),
+            q.bluetooth.unwrap_or(q.snap.bluetooth == Some(true)),
         ),
         Tile::Dnd => {
             let on = config::current().b(Id::NotifNoMolestar);
@@ -528,6 +571,12 @@ fn paint_quick(hwnd: HWND, q: &Quick) {
             info_row(g, &s, q.bat_rc, "\u{E83E}", "Batería", &txt, q.hover == QHit::BatteryRow);
         }
 
+        // aviso cuando una radio no se deja cambiar
+        if let Some(m) = &q.msg {
+            g.text_in(m, ui::s(14) as f32, (q.settings_rc.top - ui::s(20)) as f32,
+                      (w - ui::s(28)) as f32, ui::s(18) as f32, 10.5, false, s.danger,
+                      Align::Near, Align::Center, false);
+        }
         // pie
         quick_btn(g, &s, q.settings_rc, "\u{E713}", "Configuración", q.hover == QHit::Settings);
         quick_btn(g, &s, q.taskmgr_rc, "\u{E9D9}", "Administrador", q.hover == QHit::TaskMgr);
@@ -659,12 +708,41 @@ unsafe extern "system" fn quick_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                         let t = q.tiles[i].0;
                         match t {
                             Tile::Wifi => {
-                                ShowWindow(hwnd, SW_HIDE);
-                                open_url("ms-settings:network");
+                                // Si hay radio Wi-Fi se enciende o se apaga;
+                                // si no, se abre la página de red de Windows.
+                                match q.wifi {
+                                    Some(on) => {
+                                        if crate::radio::set_wifi(!on) {
+                                            q.wifi = Some(!on);
+                                            q.msg = None;
+                                        } else {
+                                            q.msg = Some("No se pudo cambiar la radio Wi-Fi.".into());
+                                        }
+                                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                                    }
+                                    None => {
+                                        ShowWindow(hwnd, SW_HIDE);
+                                        open_url("ms-settings:network");
+                                    }
+                                }
                             }
                             Tile::Bluetooth => {
-                                ShowWindow(hwnd, SW_HIDE);
-                                open_url("ms-settings:bluetooth");
+                                match q.bluetooth {
+                                    Some(on) => {
+                                        if crate::radio::set_bluetooth(!on) {
+                                            q.bluetooth = Some(!on);
+                                            q.msg = None;
+                                        } else {
+                                            q.msg = Some(
+                                                "Windows no permite cambiar la radio Bluetooth.".into());
+                                        }
+                                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                                    }
+                                    None => {
+                                        ShowWindow(hwnd, SW_HIDE);
+                                        open_url("ms-settings:bluetooth");
+                                    }
+                                }
                             }
                             Tile::Dnd => {
                                 let mut c = config::current();
@@ -772,6 +850,9 @@ pub fn create_quick(hinst: HINSTANCE) -> HWND {
         }
         let q = Box::new(Quick {
             snap: Snapshot::default(),
+            wifi: None,
+            bluetooth: None,
+            msg: None,
             tiles: Vec::new(),
             vol_track: er(),
             mute_rc: er(),
@@ -804,6 +885,11 @@ pub fn toggle_quick(hwnd: HWND, anchor_x: i32, snap: &Snapshot) {
         if !q_ptr.is_null() {
             (*q_ptr).snap = snap.clone();
             (*q_ptr).hover = QHit::None;
+            (*q_ptr).msg = None;
+            // El estado de las radios se consulta al abrir el panel, no antes:
+            // WinRT tarda unos milisegundos y no merece pagarlos de fondo.
+            (*q_ptr).wifi = crate::radio::wifi_on();
+            (*q_ptr).bluetooth = crate::radio::bluetooth_on();
         }
         let (w, h) = quick_metrics();
         let bar = crate::shell::bar_rect();

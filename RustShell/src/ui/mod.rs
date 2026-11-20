@@ -8,6 +8,8 @@ pub mod config;
 pub mod theme;
 pub mod gdip;
 pub mod window;
+pub mod menu;
+pub mod clipboard;
 
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -180,4 +182,9 @@ pub fn trim_working_set() {
     unsafe {
         EmptyWorkingSet(GetCurrentProcess());
     }
+}
+
+/// Atajo: deja texto en el portapapeles (equivale a `clipboard::set_text`).
+pub fn set_clipboard_text(text: &str) -> bool {
+    clipboard::set_text(text)
 }

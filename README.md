@@ -10,12 +10,28 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
 | Modo | Comando | Qué hace |
 |---|---|---|
 | Shell | `OptimizedShell.exe` | Barra de tareas acoplada: botón Inicio (logotipo de Windows, a la izquierda o centrado), ventanas abiertas con su icono, área de notificación, reloj, menú Inicio estilo Windows 7 y notificaciones |
-| Administrador de tareas | `--taskmgr [rendimiento\|inicio\|servicios]` | Procesos (CPU/memoria/hilos), Rendimiento (CPU, GPU, RAM, temperatura), Inicio, Servicios |
-| Explorador de archivos | `--explorer [ruta]` | Navegación, panel lateral y columnas ordenables |
+| Administrador de tareas | `--taskmgr [rendimiento\|inicio\|servicios]` | Procesos (con icono, prioridad, afinidad y EcoQoS), Rendimiento (CPU, GPU, RAM, temperatura), Inicio y Servicios |
+| Explorador de archivos | `--explorer [ruta]` | Navegación, panel lateral, columnas ordenables, operaciones de archivo, portapapeles y actualización automática |
 | Bloqueo / inicio de sesión | `--lock` · `--logon [--demo]` | Pantalla de bloqueo propia con autenticación |
 | Configuración | `--settings [inicio\|sistema\|bluetooth\|red\|personalizacion\|barra\|menu\|aplicaciones\|accesibilidad\|acerca]` | Configuración del sistema al estilo de Windows 11: buscador, categorías, información del equipo y accesos a las páginas de Windows |
 | Notificación | `--notify "Título\|Mensaje" [--ok\|--aviso\|--error] [--app <nombre>]` | Manda un aviso a la barra de tareas en ejecución (para scripts y tareas programadas) |
 | Instalación | `--install` · `--uninstall` | Usa OptimizedShell como shell del usuario actual, o vuelve a Explorer |
+
+## Escritorio y atajos
+
+- **Escritorio propio** con el papel tapiz del usuario (el de
+  `HKCU\Control Panel\Desktop`, así que se comparte con Windows), con ajuste
+  Rellenar/Ajustar/Expandir/Mosaico/Centrar, color de fondo y menú contextual.
+  Se omite solo mientras el Explorador de Windows siga siendo el shell, para no
+  taparle el escritorio real.
+- **Atajos globales**: `Win+E` explorador, `Win+R` ejecutar, `Win+I`
+  configuración, `Win+D` mostrar el escritorio, `Win+N` centro de
+  notificaciones, `Win+L` bloquear, `Ctrl+Mayús+Esc` administrador de tareas y
+  `Ctrl+Esc` menú Inicio. Se pueden desactivar en un solo ajuste.
+- **Anclar programas al menú Inicio**: botón derecho sobre cualquier programa
+  para anclarlo, abrir su ubicación, copiar su ruta o ejecutarlo como
+  administrador. Los anclados salen primero, con su chincheta, y se guardan en
+  `%APPDATA%\OptimizedShell\pinned.ini`.
 
 ## Barra de tareas
 
@@ -34,11 +50,19 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
   - *Batería*: dibujo con el nivel real, rayo al cargar, rojo por debajo del 20 %
     y porcentaje opcional. Se oculta sola en equipos de escritorio.
   - *Bluetooth*: se oculta solo si el equipo no tiene radio.
+  - *Iconos de las aplicaciones*: OptimizedShell implementa el protocolo de
+    `Shell_NotifyIcon` (ventana `Shell_TrayWnd` y `WM_COPYDATA`), así que los
+    programas ponen ahí su icono y reciben sus clics. Solo llegan cuando
+    OptimizedShell es el shell: si el Explorador está en marcha, es su barra la
+    que los recoge.
 - **Configuración rápida**: al pulsar cualquier icono se abre un panel al estilo
-  de Windows 11 con mosaicos (Red, Bluetooth, No molestar, Tema claro/oscuro),
+  de Windows 11 con mosaicos (Wi-Fi, Bluetooth, No molestar, Tema claro/oscuro),
   deslizador de volumen con silencio, estado de la red y de la batería, y
   accesos a Configuración y al Administrador de tareas. El botón derecho sobre
   cada icono abre directamente la página de Windows correspondiente.
+  - Los mosaicos de **Wi-Fi y Bluetooth encienden y apagan la radio de verdad**:
+    el Wi-Fi con `WlanSetInterface` y el Bluetooth con la API Radio de WinRT.
+    Si el equipo no tiene esa radio, el mosaico abre la página de Windows.
 
 ## Notificaciones
 
@@ -135,6 +159,14 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
   - El muestreador solo se abre mientras la pestaña está a la vista, y si una
     fuente no existe (sin contadores de GPU, sin sensores ACPI) se dice por qué
     en vez de enseñar un cero.
+- **Servicios** (`--taskmgr servicios`): todos los servicios del equipo con su
+  identificador, PID, estado y tipo de inicio, en una sola consulta al SCM.
+  Iniciar, detener y reiniciar, y cambiar el tipo de inicio desde su menú
+  contextual; si falta elevación se dice en vez de fallar en silencio.
+- **Acciones por proceso** (botón derecho en Procesos): finalizar, abrir la
+  ubicación del ejecutable, copiar su ruta, cambiar la prioridad, activar el
+  modo de eficiencia (EcoQoS) y elegir la afinidad de procesadores con una
+  casilla por núcleo. Cada fila lleva además el icono de su ejecutable.
 - **Configuración del sistema al estilo de Windows 11**: barra lateral con
   buscador que filtra **todos** los ajustes a la vez, página de inicio con la
   tarjeta del equipo (usuario, nombre del equipo y edición de Windows) y
@@ -145,8 +177,31 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
   batería, Bluetooth, salida de audio) y accesos a las páginas de Windows
   (`ms-settings:`) que OptimizedShell no reimplementa. Todo se guarda en
   `config.ini` y se aplica en caliente.
-- **Explorador**: navegación (atrás/adelante/arriba), panel lateral de accesos, columnas
-  Nombre/Fecha/Tipo/Tamaño ordenables y apertura de archivos.
+  - *Fondo de escritorio*: galería con las miniaturas de las imágenes de
+    Windows y de las del usuario (las genera GDI+ solo para las que se ven),
+    botón «Examinar...» y ajuste de encaje.
+  - *Pantalla*: monitores detectados con `EnumDisplayDevices`, resoluciones y
+    frecuencias que admite cada uno y orientación. El modo se prueba antes de
+    aplicarlo (`CDS_TEST`), así que un modo que el monitor no soporte no deja
+    la pantalla en negro.
+- **Explorador**: navegación (atrás/adelante/arriba), panel lateral de accesos,
+  columnas Nombre/Fecha/Tipo/Tamaño ordenables, iconos reales del shell y
+  selección múltiple (Ctrl, Mayús, Ctrl+A).
+  - *Operaciones de archivo* con `IFileOperation`, igual que el Explorador de
+    Windows: papelera de reciclaje, diálogo de progreso, confirmaciones,
+    elevación cuando hace falta y deshacer con Ctrl+Z. Copiar, cortar, pegar
+    (Ctrl+C/X/V), eliminar (Supr, o Mayús+Supr para saltarse la papelera),
+    cambiar nombre en la propia fila (F2) y carpeta nueva (Ctrl+N). Pegar en la
+    carpeta de origen duplica con « - copia», como Windows.
+  - *Portapapeles* en formato CF_HDROP: lo copiado aquí se pega en el
+    Explorador de Windows y al revés.
+  - *Arrastrar y soltar* archivos sobre la ventana (sobre una carpeta los mete
+    dentro; con Mayús mueve en vez de copiar).
+  - *Actualización automática* con `ReadDirectoryChangesW` en un hilo aparte:
+    lo que cambie en la carpeta aparece solo, sin perder la selección.
+  - *Menú contextual propio* con el tema de la aplicación y, dentro de él,
+    acceso al menú del shell (`IContextMenu`) con «Abrir con», «Enviar a» y lo
+    que añadan los programas instalados.
 - **Bloqueo**: reloj, tarjeta de usuario y autenticación con `LogonUserW`.
 - **Shell**: barra de tareas con botón Inicio, botones de ventanas abiertas con
   su icono, área de notificación, configuración rápida, notificaciones y reloj;
@@ -162,13 +217,13 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 
 ### Pendiente
 
-- Task Manager: pestaña Servicios, iconos por fila,
-  EcoQoS/prioridad/afinidad por proceso.
-- Configuración: galería de fondos de escritorio con miniaturas y ajustes de
-  pantalla propios (DisplayConfig/WMI) en vez de abrir los de Windows.
-- Bandeja: encender y apagar la radio Wi-Fi/Bluetooth de verdad (API Radio de
-  WinRT) en vez de abrir la página de Windows, e iconos de las aplicaciones que
-  usan `Shell_NotifyIcon`.
-- Explorador: operaciones COM (`IFileOperation`), portapapeles, arrastrar y soltar,
-  refresco por `ReadDirectoryChangesW`, menú contextual del shell.
-- Shell: escritorio con fondo, hotkeys globales y anclar programas al menú Inicio.
+- Explorador: arrastrar archivos *hacia fuera* de la ventana (hace falta
+  implementar `IDataObject` y `IDropSource`; soltar dentro ya funciona), vista
+  de iconos grandes y árbol de carpetas en el panel lateral.
+- Escritorio: iconos del escritorio (requiere la vista del shell o una lista
+  propia sobre `%USERPROFILE%\Desktop`).
+- Barra de tareas: agrupar varias ventanas de un mismo programa en un botón y
+  listas de accesos rápidos (Jump Lists).
+- Administrador de tareas: columna de E/S real por proceso (ahora es 0) y
+  árbol de procesos padre/hijo.
+- Varios monitores: la barra y el escritorio solo se dibujan en el principal.

@@ -29,6 +29,7 @@ use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::args;
+use crate::display;
 use crate::perf;
 use crate::sysinfo::{self, Net};
 use crate::ui::config::{self, Config, Id, Item, Kind, Page};
@@ -67,6 +68,10 @@ enum Row {
     S(Id),
     Link { glyph: &'static str, title: &'static str, sub: &'static str, act: Act },
     Info(InfoKind),
+    /// Galería de fondos de escritorio con miniaturas.
+    Gallery,
+    /// Monitores, resoluciones y frecuencias.
+    Displays,
 }
 
 struct Group {
@@ -183,11 +188,36 @@ static PERSONALIZACION: &[Group] = &[
         Row::S(Id::AltoTitulo),
         Row::S(Id::AnchoBotonTitulo),
     ]},
+    Group { title: "Fondo de escritorio", rows: &[
+        Row::Gallery,
+        Row::S(Id::EscritorioAjuste),
+        Row::S(Id::EscritorioColor),
+        Row::S(Id::EscritorioActivo),
+    ]},
     Group { title: "Ajustes de Windows", rows: &[
-        Row::Link { glyph: "\u{E91B}", title: "Fondo de escritorio",
-                    sub: "Imagen, color sólido o presentación", act: Act::Url("ms-settings:personalization-background") },
+        Row::Link { glyph: "\u{E91B}", title: "Más opciones de fondo",
+                    sub: "Presentación, color sólido y temas de Windows",
+                    act: Act::Url("ms-settings:personalization-background") },
         Row::Link { glyph: "\u{E770}", title: "Pantalla de bloqueo",
                     sub: "", act: Act::Url("ms-settings:lockscreen") },
+    ]},
+];
+
+// ------------------------------------------------------------ pantalla
+static PANTALLA: &[Group] = &[
+    Group { title: "Monitores", rows: &[
+        Row::Displays,
+    ]},
+    Group { title: "Escritorio", rows: &[
+        Row::S(Id::EscritorioActivo),
+        Row::S(Id::HotkeysActivas),
+    ]},
+    Group { title: "Ajustes de Windows", rows: &[
+        Row::Link { glyph: "\u{E7F8}", title: "Opciones avanzadas de pantalla",
+                    sub: "HDR, escala de Windows y varios monitores",
+                    act: Act::Url("ms-settings:display") },
+        Row::Link { glyph: "\u{E713}", title: "Configuración de gráficos",
+                    sub: "", act: Act::Url("ms-settings:display-advancedgraphics") },
     ]},
 ];
 
@@ -215,6 +245,7 @@ static BARRA: &[Group] = &[
     ]},
     Group { title: "Área de notificación", rows: &[
         Row::S(Id::BandejaMostrar),
+        Row::S(Id::BandejaIconosApps),
         Row::S(Id::BandejaSonido),
         Row::S(Id::BandejaRed),
         Row::S(Id::BandejaBateria),
@@ -259,6 +290,9 @@ static APLICACIONES: &[Group] = &[
     ]},
     Group { title: "Explorador de archivos", rows: &[
         Row::S(Id::ExplPanelLateral),
+        Row::S(Id::ExplIconos),
+        Row::S(Id::ExplAutoRefresco),
+        Row::S(Id::ExplConfirmarBorrado),
         Row::S(Id::ExplOcultos),
         Row::S(Id::ExplCarpetasPrimero),
         Row::S(Id::ExplColumnaFecha),
@@ -267,6 +301,7 @@ static APLICACIONES: &[Group] = &[
     ]},
     Group { title: "Administrador de tareas", rows: &[
         Row::S(Id::TaskmgrRefresco),
+        Row::S(Id::TaskmgrIconos),
         Row::S(Id::PerfPorNucleo),
         Row::S(Id::PerfHistorial),
     ]},
@@ -325,6 +360,9 @@ static NAV: &[NavPage] = &[
     NavPage { glyph: "\u{E770}", title: "Sistema",
         sub: "Notificaciones, energía, rendimiento y herramientas",
         arg: "sistema", reset: Some(Page::Notificaciones), groups: SISTEMA },
+    NavPage { glyph: "\u{E7F8}", title: "Pantalla",
+        sub: "Resolución, frecuencia y orientación de los monitores",
+        arg: "pantalla", reset: Some(Page::Escritorio), groups: PANTALLA },
     NavPage { glyph: "\u{E702}", title: "Bluetooth y dispositivos",
         sub: "Bluetooth, sonido, impresoras y periféricos",
         arg: "bluetooth", reset: None, groups: DISPOSITIVOS },
@@ -358,12 +396,17 @@ fn page_for_arg(arg: &str) -> usize {
         return i;
     }
     match a.as_str() {
-        "notificaciones" | "rendimiento" | "pantalla" => 1,
-        "listas" | "explorador" => 7,
-        "fondo" | "apariencia" | "tema" => 4,
-        "bandeja" => 5,
+        "notificaciones" | "rendimiento" => 1,
+        "listas" | "explorador" => index_of("aplicaciones"),
+        "fondo" | "apariencia" | "tema" => index_of("personalizacion"),
+        "bandeja" | "barra de tareas" => index_of("barra"),
+        "escritorio" => index_of("pantalla"),
         _ => 0,
     }
+}
+
+fn index_of(arg: &str) -> usize {
+    NAV.iter().position(|n| n.arg == arg).unwrap_or(0)
 }
 
 // ============================================================ zonas sensibles
@@ -379,6 +422,15 @@ enum Hit {
     Tile(usize),
     /// Fila de enlace (índice dentro de `links`).
     Link(usize),
+    /// Miniatura de la galería de fondos.
+    Wall(usize),
+    WallBrowse,
+    WallNone,
+    /// Monitor, resolución y frecuencia.
+    Display(usize),
+    Resolution(usize),
+    Rate(usize),
+    Rotate(u32),
     Toggle(Id),
     Choice(Id, i32),
     Slider(Id, u8),
@@ -395,6 +447,44 @@ enum BlockKind {
     Header(&'static str),
     Link(usize),
     Info(InfoKind),
+    Gallery,
+    Displays,
+}
+
+// ------------------------------------------------------- galería de fondos
+// Miniaturas cacheadas por ruta: generarlas cuesta, y la página se repinta
+// con cada movimiento del ratón.
+thread_local! {
+    static THUMBS: std::cell::RefCell<std::collections::HashMap<String, Option<ui::gdip::Image>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn thumb_size() -> (i32, i32) {
+    (ui::s(132), ui::s(78))
+}
+
+/// Cuántas miniaturas caben por fila y cuántas filas hacen falta.
+fn gallery_grid(cw: i32, count: usize) -> (i32, i32, i32) {
+    let (tw, th) = thumb_size();
+    let gap = ui::s(10);
+    let cols = ((cw + gap) / (tw + gap)).max(1);
+    let rows = ((count as i32 + cols - 1) / cols).max(1);
+    (cols, rows, th + gap)
+}
+
+fn gallery_height(cw: i32, count: usize) -> i32 {
+    let (_, rows, row_h) = gallery_grid(cw, count);
+    // Las miniaturas más la fila de botones de abajo.
+    rows * row_h + ui::s(46)
+}
+
+fn gallery_rect(cw: i32, origin: &RECT, i: usize) -> RECT {
+    let (tw, th) = thumb_size();
+    let gap = ui::s(10);
+    let (cols, _, _) = gallery_grid(cw, i + 1);
+    let c = i as i32 % cols;
+    let r = i as i32 / cols;
+    rect(origin.left + c * (tw + gap), origin.top + r * (th + gap), tw, th)
 }
 
 struct Block {
@@ -427,6 +517,12 @@ struct State {
     search: String,
     searching: bool,
     info: SysInfo,
+    /// Fondos de la galería y monitores: se leen una vez al abrir la página.
+    walls: Vec<String>,
+    displays: Vec<display::Display>,
+    /// Monitor que se está ajustando y mensaje del último cambio.
+    display_sel: usize,
+    display_msg: Option<String>,
     // layout
     x0: i32,
     cw: i32,
@@ -572,6 +668,92 @@ fn link_height() -> i32 {
 }
 fn header_height() -> i32 {
     ui::s(38)
+}
+
+/// Botones «Examinar...» y «Sin fondo», bajo las miniaturas.
+fn gallery_buttons(st: &State, r: &RECT) -> (RECT, RECT) {
+    let (_, rows, row_h) = gallery_grid(st.cw, st.walls.len());
+    let y = r.top + rows * row_h + ui::s(4);
+    (rect(r.left, y, ui::s(150), ui::s(32)),
+     rect(r.left + ui::s(158), y, ui::s(130), ui::s(32)))
+}
+
+// ------------------------------------------------------------ pantalla
+fn display_row_h() -> i32 {
+    ui::s(34)
+}
+
+/// Alto del bloque de monitores: tarjeta del monitor + resoluciones +
+/// frecuencias + orientación.
+fn displays_height(st: &State) -> i32 {
+    if st.displays.is_empty() {
+        return ui::s(60);
+    }
+    let sel = st.display_sel.min(st.displays.len() - 1);
+    let d = &st.displays[sel];
+    let chips_rows = |n: usize, per: usize| ((n + per - 1) / per).max(1) as i32;
+    let res_rows = chips_rows(d.resolutions().len().min(24), 4);
+    let rate_rows = chips_rows(d.rates_for(d.current.width, d.current.height).len().min(12), 6);
+    ui::s(74) // tarjeta del monitor
+        + if st.displays.len() > 1 { display_row_h() + ui::s(8) } else { 0 }
+        + ui::s(26) + res_rows * (ui::s(30) + ui::s(8))   // resoluciones
+        + ui::s(26) + rate_rows * (ui::s(30) + ui::s(8))  // frecuencias
+        + ui::s(26) + ui::s(30)                            // orientación
+        + ui::s(26)                                        // mensaje
+}
+
+/// Rectángulos sensibles del bloque de monitores, en el mismo orden en que se
+/// dibujan (medir y pintar comparten esta función).
+fn displays_hits(st: &State, r: &RECT) -> Vec<(Hit, RECT)> {
+    let mut out = Vec::new();
+    if st.displays.is_empty() {
+        return out;
+    }
+    let sel = st.display_sel.min(st.displays.len() - 1);
+    let d = &st.displays[sel];
+    let mut y = r.top + ui::s(74);
+
+    if st.displays.len() > 1 {
+        let w = (rw(r) / st.displays.len() as i32).min(ui::s(220));
+        for i in 0..st.displays.len() {
+            out.push((Hit::Display(i), rect(r.left + i as i32 * (w + ui::s(8)), y, w, display_row_h())));
+        }
+        y += display_row_h() + ui::s(8);
+    }
+
+    // Resoluciones (4 por fila).
+    y += ui::s(26);
+    let res = d.resolutions();
+    let cw = (rw(r) - ui::s(24)) / 4;
+    for (i, _) in res.iter().take(24).enumerate() {
+        let c = i as i32 % 4;
+        let row = i as i32 / 4;
+        out.push((Hit::Resolution(i),
+                  rect(r.left + c * (cw + ui::s(8)), y + row * (ui::s(30) + ui::s(8)), cw, ui::s(30))));
+    }
+    let res_rows = ((res.len().min(24) + 3) / 4).max(1) as i32;
+    y += res_rows * (ui::s(30) + ui::s(8));
+
+    // Frecuencias (6 por fila).
+    y += ui::s(26);
+    let rates = d.rates_for(d.current.width, d.current.height);
+    let rwth = (rw(r) - ui::s(40)) / 6;
+    for (i, _) in rates.iter().take(12).enumerate() {
+        let c = i as i32 % 6;
+        let row = i as i32 / 6;
+        out.push((Hit::Rate(i),
+                  rect(r.left + c * (rwth + ui::s(8)), y + row * (ui::s(30) + ui::s(8)), rwth, ui::s(30))));
+    }
+    let rate_rows = ((rates.len().min(12) + 5) / 6).max(1) as i32;
+    y += rate_rows * (ui::s(30) + ui::s(8));
+
+    // Orientación.
+    y += ui::s(26);
+    for (i, deg) in [0u32, 90, 180, 270].iter().enumerate() {
+        out.push((Hit::Rotate(*deg),
+                  rect(r.left + i as i32 * (ui::s(104) + ui::s(8)), y, ui::s(104), ui::s(30))));
+    }
+    out
 }
 
 // ============================================================ información
@@ -830,6 +1012,16 @@ fn layout(st: &mut State) {
                         st.blocks.push(Block { kind: BlockKind::Info(*kind), rect: rect(st.x0, y, st.cw, link_height()) });
                         y += link_height() + gap;
                     }
+                    Row::Gallery => {
+                        let h = gallery_height(st.cw, st.walls.len());
+                        st.blocks.push(Block { kind: BlockKind::Gallery, rect: rect(st.x0, y, st.cw, h) });
+                        y += h + gap;
+                    }
+                    Row::Displays => {
+                        let h = displays_height(st);
+                        st.blocks.push(Block { kind: BlockKind::Displays, rect: rect(st.x0, y, st.cw, h) });
+                        y += h + gap;
+                    }
                 }
             }
             y += ui::s(8);
@@ -849,6 +1041,19 @@ fn layout(st: &mut State) {
         match &b.kind {
             BlockKind::Header(_) | BlockKind::Info(_) => {}
             BlockKind::Link(i) => st.hits.push((r, Hit::Link(*i))),
+            BlockKind::Gallery => {
+                for i in 0..st.walls.len() {
+                    st.hits.push((gallery_rect(st.cw, &r, i), Hit::Wall(i)));
+                }
+                let (br, nr) = gallery_buttons(st, &r);
+                st.hits.push((br, Hit::WallBrowse));
+                st.hits.push((nr, Hit::WallNone));
+            }
+            BlockKind::Displays => {
+                for (h, hr) in displays_hits(st, &r) {
+                    st.hits.push((hr, h));
+                }
+            }
             BlockKind::Setting(it) => {
                 let it = *it;
                 match it.kind {
@@ -1014,6 +1219,8 @@ fn paint(st: &State) {
                     let (glyph, t, value) = info_row(&st.info, *kind);
                     paint_link(g, &s, &r, glyph, t, &value, false, false);
                 }
+                BlockKind::Gallery => paint_gallery(g, &s, st, &r),
+                BlockKind::Displays => paint_displays(g, &s, st, &r),
             }
         }
         g.reset_clip();
@@ -1072,6 +1279,142 @@ fn paint_home(g: &Gfx, s: &theme::Style, st: &State, dy: i32) {
                   Align::Center, false);
         g.text_in("\u{E76C}", (r.right - ui::s(26)) as f32, r.top as f32, ui::s(18) as f32, rh(&r) as f32,
                   8.5, false, s.text_faint, Align::Center, Align::Center, true);
+    }
+}
+
+/// Galería de fondos: miniaturas del tamaño de la pantalla, con el actual marcado.
+fn paint_gallery(g: &Gfx, s: &theme::Style, st: &State, r: &RECT) {
+    let current = crate::desktop::wallpaper_path().to_lowercase();
+    let (tw, th) = thumb_size();
+    for (i, path) in st.walls.iter().enumerate() {
+        let tr = gallery_rect(st.cw, r, i);
+        if tr.bottom < st.content_rc.top - th || tr.top > st.content_rc.bottom + th {
+            continue; // fuera de la vista: ni se carga la miniatura
+        }
+        let sel = path.to_lowercase() == current;
+        let hov = st.hover == Hit::Wall(i);
+        // Miniatura (se genera la primera vez que se ve y se queda en caché).
+        THUMBS.with(|c| {
+            let mut map = c.borrow_mut();
+            let entry = map.entry(path.clone()).or_insert_with(|| {
+                ui::gdip::Image::thumbnail(path, (tw * 2) as u32, (th * 2) as u32)
+            });
+            match entry {
+                Some(img) => g.draw_image_cover(img, tr.left, tr.top, tw, th),
+                None => {
+                    g.rounded(tr.left as f32, tr.top as f32, tw as f32, th as f32, ui::sf(6.0),
+                              Some(s.control_bg), None);
+                    g.text_in("\u{E91B}", tr.left as f32, tr.top as f32, tw as f32, th as f32, 14.0,
+                              false, s.text_faint, Align::Center, Align::Center, true);
+                }
+            }
+        });
+        // Borde y marca de seleccionado.
+        g.rounded(tr.left as f32, tr.top as f32, tw as f32, th as f32, ui::sf(6.0), None,
+                  Some((if sel { s.accent_solid } else if hov { s.text_dim } else { s.card_border },
+                        if sel { 2.5 } else { 1.0 })));
+        if sel {
+            let bx = tr.right - ui::s(16);
+            let by = tr.top + ui::s(16);
+            g.fill_circle(bx as f32, by as f32, ui::sf(10.0), s.accent_solid);
+            g.check(bx as f32, by as f32, ui::sf(11.0), s.on_accent, ui::sf(1.8));
+        }
+    }
+    if st.walls.is_empty() {
+        g.text_in("No se han encontrado imágenes en las carpetas de fondos.", r.left as f32,
+                  r.top as f32, rw(r) as f32, ui::s(40) as f32, 12.0, false, s.text_faint,
+                  Align::Near, Align::Center, false);
+    }
+    let (br, nr) = gallery_buttons(st, r);
+    draw_button(g, s, br, "Examinar...", st.hover == Hit::WallBrowse, false);
+    draw_button(g, s, nr, "Quitar el fondo", st.hover == Hit::WallNone, false);
+}
+
+/// Monitores: tarjeta del seleccionado, resoluciones, frecuencias y giro.
+fn paint_displays(g: &Gfx, s: &theme::Style, st: &State, r: &RECT) {
+    if st.displays.is_empty() {
+        g.text_in("No se han detectado monitores.", r.left as f32, r.top as f32, rw(r) as f32,
+                  ui::s(40) as f32, 12.5, false, s.text_faint, Align::Near, Align::Center, false);
+        return;
+    }
+    let sel = st.display_sel.min(st.displays.len() - 1);
+    let d = &st.displays[sel];
+
+    // Tarjeta con el monitor actual.
+    let card = rect(r.left, r.top, rw(r), ui::s(66));
+    g.rounded(card.left as f32, card.top as f32, rw(&card) as f32, rh(&card) as f32, ui::sf(8.0),
+              Some(s.card_bg), Some((s.card_border, 1.0)));
+    g.text_in("\u{E7F8}", (card.left + ui::s(14)) as f32, card.top as f32, ui::s(30) as f32,
+              rh(&card) as f32, 14.0, false, s.accent, Align::Center, Align::Center, true);
+    let title = if d.primary { format!("{} (principal)", d.name) } else { d.name.clone() };
+    g.text_in(&title, (card.left + ui::s(52)) as f32, (card.top + ui::s(12)) as f32,
+              (rw(&card) - ui::s(70)) as f32, ui::s(22) as f32, 13.0, true, s.text, Align::Near,
+              Align::Center, false);
+    g.text_in(&format!("{} · {} bits · {}°", d.current.full_label(), d.current.bpp, d.rotation),
+              (card.left + ui::s(52)) as f32, (card.top + ui::s(34)) as f32,
+              (rw(&card) - ui::s(70)) as f32, ui::s(20) as f32, 11.5, false, s.text_dim, Align::Near,
+              Align::Center, false);
+
+    let hits = displays_hits(st, r);
+    let chip = |g: &Gfx, rr: &RECT, label: &str, on: bool, hov: bool| {
+        g.rounded(rr.left as f32, rr.top as f32, rw(rr) as f32, rh(rr) as f32, ui::sf(6.0),
+                  Some(if on { s.accent_solid } else if hov { s.control_hover } else { s.control_bg }),
+                  Some((if on { s.accent_solid } else { s.control_border }, 1.0)));
+        g.text_in(label, rr.left as f32, rr.top as f32, rw(rr) as f32, rh(rr) as f32, 11.5, false,
+                  if on { s.on_accent } else { s.text }, Align::Center, Align::Center, false);
+    };
+
+    let res = d.resolutions();
+    let rates = d.rates_for(d.current.width, d.current.height);
+    let mut label_drawn = (false, false, false);
+    for (h, rr) in &hits {
+        match h {
+            Hit::Display(i) => {
+                let dd = &st.displays[*i];
+                chip(g, rr, &dd.name, *i == sel, st.hover == *h);
+            }
+            Hit::Resolution(i) => {
+                if !label_drawn.0 {
+                    g.text_in("Resolución", r.left as f32, (rr.top - ui::s(24)) as f32,
+                              rw(r) as f32, ui::s(20) as f32, 11.5, true, s.text_dim, Align::Near,
+                              Align::Center, false);
+                    label_drawn.0 = true;
+                }
+                let (w, hh) = res[*i];
+                let on = w == d.current.width && hh == d.current.height;
+                chip(g, rr, &format!("{} × {}", w, hh), on, st.hover == *h);
+            }
+            Hit::Rate(i) => {
+                if !label_drawn.1 {
+                    g.text_in("Frecuencia de actualización", r.left as f32, (rr.top - ui::s(24)) as f32,
+                              rw(r) as f32, ui::s(20) as f32, 11.5, true, s.text_dim, Align::Near,
+                              Align::Center, false);
+                    label_drawn.1 = true;
+                }
+                let hz = rates[*i];
+                chip(g, rr, &format!("{} Hz", hz), hz == d.current.hz, st.hover == *h);
+            }
+            Hit::Rotate(deg) => {
+                if !label_drawn.2 {
+                    g.text_in("Orientación", r.left as f32, (rr.top - ui::s(24)) as f32,
+                              rw(r) as f32, ui::s(20) as f32, 11.5, true, s.text_dim, Align::Near,
+                              Align::Center, false);
+                    label_drawn.2 = true;
+                }
+                let label = match deg {
+                    90 => "Vertical",
+                    180 => "Horizontal (↔)",
+                    270 => "Vertical (↔)",
+                    _ => "Horizontal",
+                };
+                chip(g, rr, label, *deg == d.rotation, st.hover == *h);
+            }
+            _ => {}
+        }
+    }
+    if let Some(m) = &st.display_msg {
+        g.text_in(m, r.left as f32, (r.bottom - ui::s(24)) as f32, rw(r) as f32, ui::s(20) as f32,
+                  11.5, false, s.danger, Align::Near, Align::Center, false);
     }
 }
 
@@ -1442,6 +1785,72 @@ fn click(st: &mut State, x: i32, y: i32) {
             commit(st, &c, true);
         }
         Hit::OpenIni => open_ini(),
+        Hit::Wall(i) => {
+            if let Some(p) = st.walls.get(i).cloned() {
+                crate::desktop::set_wallpaper(&p);
+                // El escritorio propio se entera por la difusión de ajustes.
+                ui::broadcast_config_changed();
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            }
+        }
+        Hit::WallBrowse => {
+            if let Some(p) = display::browse_image(hwnd) {
+                crate::desktop::set_wallpaper(&p);
+                st.walls = display::wallpapers();
+                ui::broadcast_config_changed();
+                layout(st);
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            }
+        }
+        Hit::WallNone => {
+            crate::desktop::set_wallpaper("");
+            ui::broadcast_config_changed();
+            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        }
+        Hit::Display(i) => {
+            st.display_sel = i;
+            st.display_msg = None;
+            layout(st);
+            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        }
+        Hit::Resolution(i) => {
+            let sel = st.display_sel.min(st.displays.len().saturating_sub(1));
+            if let Some(d) = st.displays.get(sel) {
+                let res = d.resolutions();
+                if let Some(&(w, h)) = res.get(i) {
+                    // Se conserva la frecuencia si la nueva resolución la admite.
+                    let hz = if d.rates_for(w, h).contains(&d.current.hz) { d.current.hz } else { 0 };
+                    let dev = d.device.clone();
+                    st.display_msg = display::set_mode(&dev, w, h, hz).err();
+                    st.displays = display::displays();
+                    layout(st);
+                    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                }
+            }
+        }
+        Hit::Rate(i) => {
+            let sel = st.display_sel.min(st.displays.len().saturating_sub(1));
+            if let Some(d) = st.displays.get(sel) {
+                let rates = d.rates_for(d.current.width, d.current.height);
+                if let Some(&hz) = rates.get(i) {
+                    let (dev, w, h) = (d.device.clone(), d.current.width, d.current.height);
+                    st.display_msg = display::set_mode(&dev, w, h, hz).err();
+                    st.displays = display::displays();
+                    layout(st);
+                    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                }
+            }
+        }
+        Hit::Rotate(deg) => {
+            let sel = st.display_sel.min(st.displays.len().saturating_sub(1));
+            if let Some(d) = st.displays.get(sel) {
+                let dev = d.device.clone();
+                st.display_msg = display::set_rotation(&dev, deg).err();
+                st.displays = display::displays();
+                layout(st);
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            }
+        }
         Hit::None => {}
     }
 }
@@ -1682,6 +2091,10 @@ pub fn run() -> i32 {
             search: String::new(),
             searching: false,
             info: collect_info(),
+            walls: display::wallpapers(),
+            displays: display::displays(),
+            display_sel: 0,
+            display_msg: None,
             x0: 0,
             cw: 0,
             content_rc: er(),

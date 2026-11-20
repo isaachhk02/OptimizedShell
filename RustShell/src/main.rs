@@ -20,6 +20,13 @@ mod shell;
 mod startmenu;
 mod tray;
 mod notify;
+mod services;
+mod desktop;
+mod radio;
+mod traynotify;
+mod display;
+mod fileops;
+mod watcher;
 
 use args::has_arg;
 

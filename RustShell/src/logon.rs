@@ -119,7 +119,7 @@ fn paint(st: &State) {
         let acx = ((c.left + c.right) / 2) as f32;
         let ay = (c.top + ui::s(58)) as f32;
         g.fill_circle(acx, ay, ui::s(40) as f32, s.accent_solid);
-        g.text_in(&initial(&st.username), (acx - ui::s(40) as f32), (ay - ui::s(40) as f32), ui::s(80) as f32, ui::s(80) as f32, 34.0, true, s.on_accent, Align::Center, Align::Center, false);
+        g.text_in(&initial(&st.username), acx - ui::s(40) as f32, ay - ui::s(40) as f32, ui::s(80) as f32, ui::s(80) as f32, 34.0, true, s.on_accent, Align::Center, Align::Center, false);
         g.text_in(&st.username, c.left as f32, (c.top + ui::s(104)) as f32, (c.right - c.left) as f32, ui::s(30) as f32, 19.0, true, theme::rgbc(240, 243, 248), Align::Center, Align::Center, false);
 
         // campo contraseña

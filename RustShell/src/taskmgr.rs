@@ -28,8 +28,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::ui::gdip::{Align, Chrome, Gfx};
 use crate::ui::config::{self, Id};
+use crate::ui::menu;
 use crate::ui::{self, theme, window};
 use crate::perf;
+use crate::services;
 use crate::startup;
 
 // ---------------------------------------------------------------- Nt API
@@ -101,6 +103,10 @@ const B_NEWTASK: i32 = 21; // Nueva tarea
 const B_TOGGLE: i32 = 22; // Habilitar/Deshabilitar (Inicio)
 const B_PERF0: i32 = 200; // + índice de la tarjeta de dispositivo (Rendimiento)
 
+const B_SVC_START: i32 = 23;
+const B_SVC_STOP: i32 = 24;
+const B_SVC_RESTART: i32 = 25;
+
 const STARTUP_COLS: [Col; 4] = [
     Col { title: "Nombre", width: 240, right: false },
     Col { title: "Estado", width: 120, right: false },
@@ -108,9 +114,18 @@ const STARTUP_COLS: [Col; 4] = [
     Col { title: "Comando", width: 0, right: false },
 ];
 
+const SERVICE_COLS: [Col; 5] = [
+    Col { title: "Nombre", width: 0, right: false },
+    Col { title: "Identificador", width: 190, right: false },
+    Col { title: "PID", width: 76, right: true },
+    Col { title: "Estado", width: 130, right: false },
+    Col { title: "Tipo de inicio", width: 130, right: false },
+];
+
 fn columns(tab: Tab) -> &'static [Col] {
     match tab {
         Tab::Startup => &STARTUP_COLS,
+        Tab::Services => &SERVICE_COLS,
         _ => &PROC_COLS,
     }
 }
@@ -190,6 +205,15 @@ struct State {
     // Inicio
     startup_items: Vec<startup::Entry>,
     startup_sel: isize,
+    // Servicios
+    services: Vec<services::Service>,
+    svc_view: Vec<usize>,
+    svc_sel: isize,
+    /// Último mensaje del SCM (error de permisos, servicio detenido...).
+    svc_msg: Option<String>,
+    btn_svc_start: RECT,
+    btn_svc_stop: RECT,
+    btn_svc_restart: RECT,
     // resumen
     mem_used: u64,
     mem_total: u64,
@@ -564,7 +588,7 @@ fn layout(st: &mut State) {
     st.btn_newtask = empty_rect();
     st.btn_toggle = empty_rect();
     let mut rx = w - ui::s(14);
-    let mut right = |width: i32, rx: &mut i32| -> RECT {
+    let right = |width: i32, rx: &mut i32| -> RECT {
         *rx -= width;
         let r = RECT { left: *rx, top: y, right: *rx + width, bottom: y + bh };
         *rx -= ui::s(8);
@@ -577,6 +601,11 @@ fn layout(st: &mut State) {
         }
         Tab::Startup => {
             st.btn_toggle = right(ui::s(150), &mut rx);
+        }
+        Tab::Services => {
+            st.btn_svc_restart = right(ui::s(112), &mut rx);
+            st.btn_svc_stop = right(ui::s(100), &mut rx);
+            st.btn_svc_start = right(ui::s(100), &mut rx);
         }
         _ => {}
     }
@@ -711,6 +740,30 @@ fn paint(st: &State) {
                 };
                 draw_button(g, &s, st.btn_toggle, label, st.hover_btn == B_TOGGLE, true, false);
             }
+            Tab::Services => {
+                let sel = selected_service(st);
+                let running = sel.map(|s| s.state.running()).unwrap_or(false);
+                let any = sel.is_some();
+                draw_button(g, &s, st.btn_svc_start, "Iniciar", st.hover_btn == B_SVC_START,
+                            any && !running, false);
+                draw_button(g, &s, st.btn_svc_stop, "Detener", st.hover_btn == B_SVC_STOP, false,
+                            any && running);
+                draw_button(g, &s, st.btn_svc_restart, "Reiniciar", st.hover_btn == B_SVC_RESTART,
+                            false, false);
+                // Aviso del SCM (normalmente, falta de permisos).
+                if let Some(m) = &st.svc_msg {
+                    g.text_in(m, (st.search_rc.right + ui::s(14)) as f32, st.search_rc.top as f32,
+                              (st.btn_svc_start.left - st.search_rc.right - ui::s(28)) as f32,
+                              (st.search_rc.bottom - st.search_rc.top) as f32, 11.0, false, s.danger,
+                              Align::Near, Align::Center, false);
+                } else if !services::is_elevated() {
+                    g.text_in("Inicia OptimizedShell como administrador para controlar servicios.",
+                              (st.search_rc.right + ui::s(14)) as f32, st.search_rc.top as f32,
+                              (st.btn_svc_start.left - st.search_rc.right - ui::s(28)) as f32,
+                              (st.search_rc.bottom - st.search_rc.top) as f32, 11.0, false, s.text_faint,
+                              Align::Near, Align::Center, false);
+                }
+            }
             _ => {}
         }
 
@@ -719,13 +772,7 @@ fn paint(st: &State) {
             Tab::Proc => paint_table(g, &s, st),
             Tab::Perf => paint_perf(g, &s, st),
             Tab::Startup => paint_startup(g, &s, st),
-            _ => {
-                g.text_in(
-                    "Esta pestaña se añadirá en una próxima iteración del port a Rust.",
-                    st.content.left as f32, (st.content.top + ui::s(20)) as f32,
-                    (st.content.right - st.content.left) as f32, ui::s(28) as f32,
-                    13.0, false, s.text_faint, Align::Center, Align::Center, false);
-            }
+            Tab::Services => paint_services(g, &s, st),
         }
     });
 }
@@ -992,9 +1039,22 @@ fn paint_table(g: &Gfx, s: &theme::Style, st: &State) {
         } else if row == st.hover_row {
             g.rounded(rr_x as f32, ry as f32, rr_w as f32, rr_h as f32, ui::sf(5.0), Some(s.row_hover), None);
         }
+        // Icono del ejecutable (solo para las filas visibles, y cacheado).
+        let icons = config::current().b(Id::TaskmgrIconos);
+        let isz = ui::s(16);
+        if icons {
+            let icon = proc_icon(p.pid);
+            if icon.is_null() {
+                g.text_in("\u{E7C3}", (hx[0] + ui::s(2)) as f32, ry as f32, isz as f32, rr_h as f32,
+                          10.0, false, s.text_faint, Align::Center, Align::Center, true);
+            } else {
+                g.draw_hicon(icon, hx[0] + ui::s(2), ry + (rr_h - isz) / 2, isz);
+            }
+        }
         for (c, col) in PROC_COLS.iter().enumerate() {
-            let cx = hx[c] + ui::s(2);
-            let cw = hx[c + 1] - hx[c] - ui::s(10);
+            let extra = if c == 0 && icons { isz + ui::s(8) } else { 0 };
+            let cx = hx[c] + ui::s(2) + extra;
+            let cw = hx[c + 1] - hx[c] - ui::s(10) - extra;
             let color = match c {
                 0 => s.text,
                 2 => if p.cpu >= 50.0 { s.danger } else if p.cpu >= 15.0 { s.warning } else { s.text_dim },
@@ -1057,6 +1117,464 @@ fn paint_startup(g: &Gfx, s: &theme::Style, st: &State) {
     }
 }
 
+// ---------------------------------------------------------------- servicios
+fn load_services(st: &mut State) {
+    st.services = services::enumerate();
+    // El tipo de inicio se consulta servicio a servicio, así que solo se pide
+    // para lo que de verdad se va a ver.
+    services::fill_start_types(&mut st.services);
+    rebuild_services(st);
+}
+
+fn rebuild_services(st: &mut State) {
+    let f = st.filter.to_lowercase();
+    st.svc_view = st
+        .services
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            f.is_empty() || s.display.to_lowercase().contains(&f) || s.name.to_lowercase().contains(&f)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if st.svc_sel >= st.svc_view.len() as isize {
+        st.svc_sel = -1;
+    }
+    let max = (st.svc_view.len() as i32 - visible_rows(st)).max(0);
+    st.scroll = st.scroll.clamp(0, max);
+}
+
+fn selected_service(st: &State) -> Option<&services::Service> {
+    let i = *st.svc_view.get(st.svc_sel.max(0) as usize)?;
+    st.services.get(i)
+}
+
+/// Ejecuta una acción del SCM sobre el servicio seleccionado y refresca su
+/// estado, dejando el mensaje de error a la vista si lo hubo.
+fn service_action(st: &mut State, what: i32) {
+    let Some(svc) = selected_service(st) else { return };
+    let name = svc.name.clone();
+    let r = match what {
+        B_SVC_START => services::start(&name),
+        B_SVC_STOP => services::stop(&name),
+        _ => services::restart(&name),
+    };
+    st.svc_msg = match r {
+        Ok(()) => None,
+        Err(e) => Some(e),
+    };
+    // Solo se vuelve a preguntar por este servicio, no por los 300 del equipo.
+    let state = services::query_state(&name);
+    if let Some(s) = st.services.iter_mut().find(|s| s.name == name) {
+        s.state = state;
+        if !state.running() {
+            s.pid = 0;
+        }
+    }
+}
+
+fn paint_services(g: &Gfx, s: &theme::Style, st: &State) {
+    let cols = &SERVICE_COLS;
+    let hx = &st.col_x;
+    let header_top = st.content.top;
+    let header_h = ui::s(30);
+    for (i, c) in cols.iter().enumerate() {
+        g.text_in(c.title, (hx[i] + ui::s(2)) as f32, header_top as f32,
+                  (hx[i + 1] - hx[i] - ui::s(10)) as f32, header_h as f32, 11.5, true, s.text_dim,
+                  if c.right { Align::Far } else { Align::Near }, Align::Center, false);
+    }
+    g.hline(st.content.left, st.content.right, header_top + header_h - 1, s.separator);
+
+    let body_top = header_top + header_h;
+    let vis = visible_rows(st);
+    for row in 0..vis {
+        let idx = (st.scroll + row) as usize;
+        if idx >= st.svc_view.len() {
+            break;
+        }
+        let sv = &st.services[st.svc_view[idx]];
+        let ry = body_top + row * row_h();
+        let rr_x = st.content.left + ui::s(2);
+        let rr_w = st.content.right - ui::s(10) - rr_x;
+        let rr_h = row_h() - ui::s(2);
+        if idx as isize == st.svc_sel {
+            g.rounded(rr_x as f32, ry as f32, rr_w as f32, rr_h as f32, ui::sf(5.0), Some(s.row_selected), None);
+        } else if row == st.hover_row {
+            g.rounded(rr_x as f32, ry as f32, rr_w as f32, rr_h as f32, ui::sf(5.0), Some(s.row_hover), None);
+        }
+        // Punto de estado delante del nombre.
+        let dot = if sv.state.running() { s.success } else { s.text_faint };
+        g.fill_circle((hx[0] + ui::s(8)) as f32, (ry + rr_h / 2) as f32, ui::sf(3.5), dot);
+        let vals = [
+            sv.display.clone(),
+            sv.name.clone(),
+            if sv.pid == 0 { String::new() } else { sv.pid.to_string() },
+            sv.state.label().to_string(),
+            sv.start.label().to_string(),
+        ];
+        for (c, v) in vals.iter().enumerate() {
+            let color = match c {
+                0 => s.text,
+                3 => if sv.state.running() { s.success } else { s.text_dim },
+                4 => if sv.start == services::StartType::Disabled { s.text_faint } else { s.text_dim },
+                _ => s.text_dim,
+            };
+            let x0 = hx[c] + if c == 0 { ui::s(18) } else { ui::s(2) };
+            let w = hx[c + 1] - x0 - ui::s(10);
+            g.text_in(v, x0 as f32, ry as f32, w as f32, rr_h as f32, 11.5, false, color,
+                      if cols[c].right { Align::Far } else { Align::Near }, Align::Center, false);
+        }
+    }
+    if st.svc_view.is_empty() {
+        let msg = if st.services.is_empty() {
+            "No se pudo consultar el administrador de servicios."
+        } else {
+            "Ningún servicio coincide."
+        };
+        g.text_in(msg, st.content.left as f32, (body_top + ui::s(20)) as f32,
+                  (st.content.right - st.content.left) as f32, ui::s(28) as f32, 13.0, false, s.text_faint,
+                  Align::Center, Align::Center, false);
+    }
+}
+
+// ------------------------------------------------- acciones sobre un proceso
+const PRIORITY_LEVELS: [(u32, &str); 6] = [
+    (0x0000_0100, "Tiempo real"),
+    (0x0000_0080, "Alta"),
+    (0x0000_8000, "Por encima de lo normal"),
+    (0x0000_0020, "Normal"),
+    (0x0000_4000, "Por debajo de lo normal"),
+    (0x0000_0040, "Baja"),
+];
+
+/// Abre el proceso con los permisos necesarios para consultarlo y cambiarlo.
+fn open_for_tuning(pid: u32) -> windows_sys::Win32::Foundation::HANDLE {
+    use windows_sys::Win32::System::Threading::{
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+    };
+    unsafe { OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) }
+}
+
+fn process_priority(pid: u32) -> u32 {
+    use windows_sys::Win32::System::Threading::GetPriorityClass;
+    unsafe {
+        let h = open_for_tuning(pid);
+        if h.is_null() {
+            return 0;
+        }
+        let p = GetPriorityClass(h);
+        CloseHandle(h);
+        p
+    }
+}
+
+fn set_process_priority(pid: u32, class: u32) -> bool {
+    use windows_sys::Win32::System::Threading::SetPriorityClass;
+    unsafe {
+        let h = open_for_tuning(pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = SetPriorityClass(h, class) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+/// Máscara de afinidad del proceso y del sistema.
+fn process_affinity(pid: u32) -> Option<(usize, usize)> {
+    use windows_sys::Win32::System::Threading::GetProcessAffinityMask;
+    unsafe {
+        let h = open_for_tuning(pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut pm: usize = 0;
+        let mut sm: usize = 0;
+        let ok = GetProcessAffinityMask(h, &mut pm, &mut sm) != 0;
+        CloseHandle(h);
+        if ok { Some((pm, sm)) } else { None }
+    }
+}
+
+fn set_process_affinity(pid: u32, mask: usize) -> bool {
+    use windows_sys::Win32::System::Threading::SetProcessAffinityMask;
+    unsafe {
+        let h = open_for_tuning(pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = SetProcessAffinityMask(h, mask) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+/// ¿El proceso está en modo de eficiencia (EcoQoS)?
+fn process_eco(pid: u32) -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetProcessInformation, ProcessPowerThrottling, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE,
+    };
+    unsafe {
+        let h = open_for_tuning(pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut stt: PROCESS_POWER_THROTTLING_STATE = std::mem::zeroed();
+        let ok = GetProcessInformation(h, ProcessPowerThrottling, &mut stt as *mut _ as *mut c_void,
+                                       std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32) != 0;
+        CloseHandle(h);
+        ok && stt.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED != 0
+    }
+}
+
+fn set_process_eco(pid: u32, on: bool) -> bool {
+    use windows_sys::Win32::System::Threading::{
+        SetProcessInformation, ProcessPowerThrottling, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    };
+    unsafe {
+        let h = open_for_tuning(pid);
+        if h.is_null() {
+            return false;
+        }
+        let stt = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        };
+        let ok = SetProcessInformation(h, ProcessPowerThrottling, &stt as *const _ as *const c_void,
+                                       std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32) != 0;
+        // EcoQoS implica prioridad baja: es lo que hace el propio Windows.
+        if ok && on {
+            set_process_priority(pid, 0x0000_4000);
+        }
+        CloseHandle(h);
+        ok
+    }
+}
+
+/// Ruta del ejecutable de un proceso (cacheada por PID).
+fn process_path(pid: u32) -> String {
+    use windows_sys::Win32::System::Threading::{
+        QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    PROC_PATHS.with(|c| {
+        if let Some(p) = c.borrow().get(&pid) {
+            return p.clone();
+        }
+        let mut out = String::new();
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if !h.is_null() {
+                let mut buf = [0u16; 512];
+                let mut len = buf.len() as u32;
+                if QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0 {
+                    out = String::from_utf16_lossy(&buf[..len as usize]);
+                }
+                CloseHandle(h);
+            }
+        }
+        c.borrow_mut().insert(pid, out.clone());
+        out
+    })
+}
+
+thread_local! {
+    /// Ruta del ejecutable por PID: no cambia mientras el proceso vive.
+    static PROC_PATHS: std::cell::RefCell<HashMap<u32, String>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Icono por PID (el del ejecutable, cacheado por ruta en `apps`).
+    static PROC_ICONS: std::cell::RefCell<HashMap<u32, isize>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Icono del ejecutable de un proceso. Se resuelve solo para las filas que se
+/// ven y se cachea: pedirlo para los 300 procesos en cada refresco no.
+fn proc_icon(pid: u32) -> HICON {
+    PROC_ICONS.with(|c| {
+        if let Some(&h) = c.borrow().get(&pid) {
+            return h as HICON;
+        }
+        let path = process_path(pid);
+        let icon = if path.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            crate::apps::icon(&path)
+        };
+        let mut map = c.borrow_mut();
+        // Tope de seguridad, como en el menú Inicio.
+        if map.len() < 512 {
+            map.insert(pid, icon as isize);
+        }
+        icon
+    })
+}
+
+/// Abre el Explorador en la carpeta del ejecutable del proceso.
+fn open_process_location(pid: u32) {
+    let path = process_path(pid);
+    if path.is_empty() {
+        return;
+    }
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        crate::shell::launch_own(&format!("--explorer {}", dir.to_string_lossy()));
+    }
+}
+
+/// Menú contextual de un proceso: finalizar, ubicación, prioridad, eficiencia
+/// y afinidad.
+fn process_menu(st: &mut State, screen_x: i32, screen_y: i32) {
+    let pid = st.sel_pid;
+    if pid == 0 {
+        return;
+    }
+    let name = st
+        .procs
+        .iter()
+        .find(|p| p.pid == pid)
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    let cur = process_priority(pid);
+    let eco = process_eco(pid);
+    let path = process_path(pid);
+
+    let mut items = vec![
+        menu::Item::header(&format!("{} ({})", name, pid)),
+        menu::Item::new(1, "Finalizar tarea").glyph("\u{E711}").danger(),
+        menu::Item::new(2, "Abrir ubicación del archivo")
+            .glyph("\u{E8DA}")
+            .enabled(!path.is_empty()),
+        menu::Item::new(3, "Copiar ruta").glyph("\u{E8C8}").enabled(!path.is_empty()),
+        menu::Item::sep(),
+        menu::Item::header("Prioridad"),
+    ];
+    for (i, (class, label)) in PRIORITY_LEVELS.iter().enumerate() {
+        items.push(menu::Item::new(10 + i as i32, label).checked(cur == *class));
+    }
+    items.push(menu::Item::sep());
+    items.push(
+        menu::Item::new(20, "Modo de eficiencia (EcoQoS)")
+            .glyph("\u{E945}")
+            .checked(eco),
+    );
+    items.push(menu::Item::new(30, "Afinidad de procesadores...").glyph("\u{E950}"));
+
+    match menu::popup(st.hwnd, screen_x, screen_y, items) {
+        1 => end_selected(st),
+        2 => open_process_location(pid),
+        3 => {
+            ui::set_clipboard_text(&path);
+        }
+        id @ 10..=15 => {
+            set_process_priority(pid, PRIORITY_LEVELS[(id - 10) as usize].0);
+        }
+        20 => {
+            set_process_eco(pid, !eco);
+        }
+        30 => affinity_menu(st, screen_x, screen_y, pid),
+        _ => {}
+    }
+}
+
+/// Segundo menú: una casilla por procesador lógico y «Aplicar».
+fn affinity_menu(st: &State, x: i32, y: i32, pid: u32) {
+    let Some((mask, system)) = process_affinity(pid) else { return };
+    let cores = (0..usize::BITS as usize).filter(|i| system & (1 << i) != 0).collect::<Vec<_>>();
+    if cores.is_empty() {
+        return;
+    }
+    let mut items = vec![menu::Item::header("Procesadores permitidos")];
+    for &c in &cores {
+        items.push(
+            menu::Item::new(100 + c as i32, &format!("CPU {}", c))
+                .checked(mask & (1 << c) != 0)
+                .keep_open(),
+        );
+    }
+    items.push(menu::Item::sep());
+    items.push(menu::Item::new(1, "Todos los procesadores").glyph("\u{E73E}"));
+    items.push(menu::Item::new(2, "Aplicar").glyph("\u{E930}"));
+
+    let out = menu::popup_ex(st.hwnd, x, y, items);
+    match out.id {
+        1 => {
+            set_process_affinity(pid, system);
+        }
+        2 => {
+            // Las casillas están en el mismo orden en que se construyeron.
+            let mut m: usize = 0;
+            for (i, &c) in cores.iter().enumerate() {
+                if out.checked.get(i + 1).copied().unwrap_or(false) {
+                    m |= 1 << c;
+                }
+            }
+            if m != 0 {
+                set_process_affinity(pid, m);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Menú contextual de un servicio: iniciar, detener, reiniciar y tipo de inicio.
+fn service_menu(st: &mut State, x: i32, y: i32) {
+    let Some(sv) = selected_service(st) else { return };
+    let name = sv.name.clone();
+    let display = sv.display.clone();
+    let running = sv.state.running();
+    let pid = sv.pid;
+    let cur = sv.start;
+
+    let items = vec![
+        menu::Item::header(&display),
+        menu::Item::new(1, "Iniciar").glyph("\u{E768}").enabled(!running),
+        menu::Item::new(2, "Detener").glyph("\u{E71A}").enabled(running),
+        menu::Item::new(3, "Reiniciar").glyph("\u{E72C}").enabled(running),
+        menu::Item::sep(),
+        menu::Item::new(4, "Ver el proceso").glyph("\u{E9D9}").enabled(pid != 0),
+        menu::Item::new(5, "Copiar el identificador").glyph("\u{E8C8}"),
+        menu::Item::sep(),
+        menu::Item::header("Tipo de inicio"),
+        menu::Item::new(10, "Automático").checked(cur == services::StartType::Automatic),
+        menu::Item::new(11, "Manual").checked(cur == services::StartType::Manual),
+        menu::Item::new(12, "Deshabilitado").checked(cur == services::StartType::Disabled),
+    ];
+    let id = menu::popup(st.hwnd, x, y, items);
+    match id {
+        1 => service_action(st, B_SVC_START),
+        2 => service_action(st, B_SVC_STOP),
+        3 => service_action(st, B_SVC_RESTART),
+        4 => {
+            // Salta a Procesos con ese PID seleccionado.
+            st.sel_pid = pid;
+            switch_tab(st, Tab::Proc);
+            snapshot(st);
+        }
+        5 => {
+            ui::set_clipboard_text(&name);
+        }
+        10 | 11 | 12 => {
+            let t = match id {
+                10 => services::StartType::Automatic,
+                11 => services::StartType::Manual,
+                _ => services::StartType::Disabled,
+            };
+            st.svc_msg = match services::set_start_type(&name, t) {
+                Ok(()) => {
+                    if let Some(s) = st.services.iter_mut().find(|s| s.name == name) {
+                        s.start = t;
+                    }
+                    None
+                }
+                Err(e) => Some(e),
+            };
+        }
+        _ => {}
+    }
+}
+
 fn load_startup(st: &mut State) {
     st.startup_items = startup::enumerate();
     if st.startup_sel >= st.startup_items.len() as isize {
@@ -1108,6 +1626,17 @@ fn hit_test_btn(st: &State, x: i32, y: i32) -> i32 {
                 return B_TOGGLE;
             }
         }
+        Tab::Services => {
+            if in_rect(&st.btn_svc_start, x, y) {
+                return B_SVC_START;
+            }
+            if in_rect(&st.btn_svc_stop, x, y) {
+                return B_SVC_STOP;
+            }
+            if in_rect(&st.btn_svc_restart, x, y) {
+                return B_SVC_RESTART;
+            }
+        }
         Tab::Perf => {
             for (i, r) in st.perf_cards.iter().enumerate() {
                 if in_rect(r, x, y) {
@@ -1115,7 +1644,7 @@ fn hit_test_btn(st: &State, x: i32, y: i32) -> i32 {
                 }
             }
         }
-        _ => {}
+
     }
     B_NONE
 }
@@ -1123,6 +1652,7 @@ fn hit_test_btn(st: &State, x: i32, y: i32) -> i32 {
 fn row_count(st: &State) -> i32 {
     match st.tab {
         Tab::Startup => st.startup_items.len() as i32,
+        Tab::Services => st.svc_view.len() as i32,
         _ => st.view.len() as i32,
     }
 }
@@ -1186,6 +1716,14 @@ fn switch_tab(st: &mut State, t: Tab) {
     st.scroll = 0;
     if t == Tab::Startup {
         load_startup(st);
+    }
+    if t == Tab::Services {
+        st.svc_msg = None;
+        load_services(st);
+    } else {
+        // La lista de servicios no se mantiene viva fuera de su pestaña.
+        st.services.clear();
+        st.svc_view.clear();
     }
     // El muestreador de Rendimiento (PDH incluido) solo vive mientras se ve la
     // pestaña: fuera de ella no cuesta nada.
@@ -1320,6 +1858,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     B_END => { end_selected(st); return 0; }
                     B_NEWTASK => { new_task(); return 0; }
                     B_TOGGLE => { toggle_startup(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
+                    B_SVC_START | B_SVC_STOP | B_SVC_RESTART => {
+                        service_action(st, btn);
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                        return 0;
+                    }
                     b if b >= B_PERF0 => {
                         st.perf_sel = (b - B_PERF0) as usize;
                         InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -1360,6 +1903,43 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         st.startup_sel = r as isize;
                         InvalidateRect(hwnd, std::ptr::null(), 0);
                     }
+                } else if st.tab == Tab::Services {
+                    let r = row_at(st, x, y);
+                    if r >= 0 {
+                        st.svc_sel = r as isize;
+                        st.svc_msg = None;
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                }
+            }
+            0
+        }
+        WM_RBUTTONUP => {
+            // Menú contextual: acciones sobre el proceso o el servicio de la fila.
+            if !st_ptr.is_null() {
+                let st = &mut *st_ptr;
+                let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+                let r = row_at(st, x, y);
+                if r >= 0 {
+                    let mut pt = POINT { x, y };
+                    windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+                    match st.tab {
+                        Tab::Proc => {
+                            st.sel_pid = st.procs[st.view[r as usize]].pid;
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                            process_menu(st, pt.x, pt.y);
+                            snapshot(st);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
+                        Tab::Services => {
+                            st.svc_sel = r as isize;
+                            st.svc_msg = None;
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                            service_menu(st, pt.x, pt.y);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
+                        _ => {}
+                    }
                 }
             }
             0
@@ -1378,16 +1958,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if !st_ptr.is_null() {
                 let st = &mut *st_ptr;
                 let ch = wp as u32;
-                if ch == VK_BACK as u32 {
+                let changed = if ch == VK_BACK as u32 {
                     st.filter.pop();
-                    rebuild_view(st);
-                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    true
                 } else if ch >= 0x20 {
-                    if let Some(c) = char::from_u32(ch) {
-                        st.filter.push(c);
-                        rebuild_view(st);
-                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    match char::from_u32(ch) {
+                        Some(c) => {
+                            st.filter.push(c);
+                            true
+                        }
+                        None => false,
                     }
+                } else {
+                    false
+                };
+                if changed {
+                    if st.tab == Tab::Services {
+                        rebuild_services(st);
+                    } else {
+                        rebuild_view(st);
+                    }
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
             }
             0
@@ -1400,7 +1991,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     end_selected(st);
                 } else if vk == VK_ESCAPE as u32 && !st.filter.is_empty() {
                     st.filter.clear();
-                    rebuild_view(st);
+                    if st.tab == Tab::Services {
+                        rebuild_services(st);
+                    } else {
+                        rebuild_view(st);
+                    }
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
             }
@@ -1497,6 +2092,13 @@ pub fn run() -> i32 {
             col_x: Vec::new(),
             startup_items: Vec::new(),
             startup_sel: -1,
+            services: Vec::new(),
+            svc_view: Vec::new(),
+            svc_sel: -1,
+            svc_msg: None,
+            btn_svc_start: empty_rect(),
+            btn_svc_stop: empty_rect(),
+            btn_svc_restart: empty_rect(),
             mem_used: 0,
             mem_total: 0,
             mem_load: 0,
@@ -1515,9 +2117,15 @@ pub fn run() -> i32 {
         SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         layout(&mut *st_raw);
-        if (*st_raw).tab == Tab::Perf {
-            (*st_raw).sampler = Some(perf::Sampler::new());
+        // Cada pestaña carga lo suyo también cuando es la de partida
+        // (`--taskmgr servicios`), no solo al cambiar a ella.
+        match (*st_raw).tab {
+            Tab::Perf => (*st_raw).sampler = Some(perf::Sampler::new()),
+            Tab::Startup => load_startup(&mut *st_raw),
+            Tab::Services => load_services(&mut *st_raw),
+            Tab::Proc => {}
         }
+        ui::menu::register(hinst);
         snapshot(&mut *st_raw); // primer muestreo (sin %CPU)
         snapshot(&mut *st_raw); // segundo para tener %CPU inmediato no es posible aún; se llenará en el timer
         ShowWindow(hwnd, SW_SHOWNORMAL);

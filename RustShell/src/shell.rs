@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
@@ -62,6 +62,7 @@ struct State {
     notif: notify::Windows,
     tip: HWND,
     tray: Tray,
+    desktop: HWND,
     tracking: bool,
     /// Estado anterior, para avisar solo de los cambios.
     last_net_up: Option<bool>,
@@ -132,7 +133,7 @@ fn refresh_apps(st: &mut State) {
     let mut apps = ENUM_ACC.with(|a| a.borrow_mut().drain(..).collect::<Vec<_>>());
     apps.retain(|a| {
         a.hwnd != own && a.hwnd != st.menu && a.hwnd != st.quick && a.hwnd != st.tip
-            && a.hwnd != st.notif.toasts && a.hwnd != st.notif.center
+            && a.hwnd != st.notif.toasts && a.hwnd != st.notif.center && a.hwnd != st.desktop
     });
     // Las ventanas que han desaparecido dejan de ocupar sitio en la caché.
     WIN_ICONS.with(|c| {
@@ -621,6 +622,79 @@ fn toggle_menu(st: &State) {
     startmenu::toggle(st.menu, st.hwnd);
 }
 
+// ------------------------------------------------------------ atajos globales
+// Los que el shell de Windows reserva para sí: con OptimizedShell como shell
+// no los atiende nadie, así que los registra la barra.
+const HK_EXPLORER: i32 = 1; // Win+E
+const HK_RUN: i32 = 2; // Win+R
+const HK_SETTINGS: i32 = 3; // Win+I
+const HK_DESKTOP: i32 = 4; // Win+D
+const HK_TASKMGR: i32 = 5; // Ctrl+Mayús+Esc
+const HK_START: i32 = 6; // Ctrl+Esc
+const HK_NOTIF: i32 = 7; // Win+N
+const HK_LOCK: i32 = 8; // Win+L
+
+fn register_hotkeys(hwnd: HWND) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        RegisterHotKey, MOD_CONTROL, MOD_SHIFT, MOD_WIN, VK_ESCAPE,
+    };
+    unregister_hotkeys(hwnd);
+    if !config::current().b(Id::HotkeysActivas) {
+        return;
+    }
+    unsafe {
+        RegisterHotKey(hwnd, HK_EXPLORER, MOD_WIN, b'E' as u32);
+        RegisterHotKey(hwnd, HK_RUN, MOD_WIN, b'R' as u32);
+        RegisterHotKey(hwnd, HK_SETTINGS, MOD_WIN, b'I' as u32);
+        RegisterHotKey(hwnd, HK_DESKTOP, MOD_WIN, b'D' as u32);
+        RegisterHotKey(hwnd, HK_NOTIF, MOD_WIN, b'N' as u32);
+        RegisterHotKey(hwnd, HK_LOCK, MOD_WIN, b'L' as u32);
+        RegisterHotKey(hwnd, HK_TASKMGR, MOD_CONTROL | MOD_SHIFT, VK_ESCAPE as u32);
+        RegisterHotKey(hwnd, HK_START, MOD_CONTROL, VK_ESCAPE as u32);
+    }
+}
+
+fn unregister_hotkeys(hwnd: HWND) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
+    unsafe {
+        for id in HK_EXPLORER..=HK_LOCK {
+            UnregisterHotKey(hwnd, id);
+        }
+    }
+}
+
+fn run_hotkey(st: &mut State, id: i32) {
+    match id {
+        HK_EXPLORER => launch_own(&format!(
+            "--explorer {}",
+            std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into())
+        )),
+        HK_RUN => unsafe {
+            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
+                          ui::wide("explorer.exe").as_ptr(),
+                          ui::wide("shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}").as_ptr(),
+                          std::ptr::null(), SW_SHOWNORMAL);
+        },
+        HK_SETTINGS => launch_own("--settings"),
+        HK_DESKTOP => crate::desktop::show_desktop(),
+        HK_TASKMGR => launch_own("--taskmgr"),
+        HK_START => toggle_menu(st),
+        HK_NOTIF => {
+            let x = st
+                .tray
+                .items
+                .iter()
+                .find(|i| i.kind == tray::Kind::Bell)
+                .map(|i| (i.rect.left + i.rect.right) / 2)
+                .unwrap_or(st.clock_rc.left);
+            notify::toggle_center(st.notif.center, x);
+            unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+        }
+        HK_LOCK => launch_own("--lock"),
+        _ => {}
+    }
+}
+
 // ------------------------------------------------------------ colocación
 /// Rectángulo que ocupa la barra según la configuración.
 pub fn bar_rect() -> RECT {
@@ -677,6 +751,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // El icono del botón Inicio puede haber cambiado de origen.
             START_ICON.with(|c| *c.borrow_mut() = None);
             apply_placement(st, false);
+            register_hotkeys(hwnd);
             ui::apply_perf();
             InvalidateRect(hwnd, std::ptr::null(), 0);
             InvalidateRect(st.menu, std::ptr::null(), 0);
@@ -707,6 +782,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_DISPLAYCHANGE => {
             if !st_ptr.is_null() {
                 apply_placement(&mut *st_ptr, false);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            0
+        }
+        WM_HOTKEY => {
+            if !st_ptr.is_null() {
+                run_hotkey(&mut *st_ptr, wp as i32);
+            }
+            0
+        }
+        crate::traynotify::WM_TRAY_CHANGED => {
+            // Una aplicación ha añadido o quitado su icono de la bandeja.
+            if !st_ptr.is_null() {
+                let st = &mut *st_ptr;
+                layout(st);
                 InvalidateRect(hwnd, std::ptr::null(), 0);
             }
             0
@@ -808,13 +898,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 if let Some(i) = st.tray.hit(x, y) {
                     let r = st.tray.items[i].rect;
                     let cx = (r.left + r.right) / 2;
-                    st.tray.sample(true);
                     match st.tray.items[i].kind {
+                        tray::Kind::App(j) => {
+                            // El clic es del programa dueño del icono, no nuestro.
+                            if let Some(a) = st.tray.apps.get(j) {
+                                let mut pt = POINT { x, y };
+                                windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+                                crate::traynotify::forward_click(a, WM_LBUTTONUP, pt.x, pt.y);
+                            }
+                        }
                         tray::Kind::Bell => {
+                            st.tray.sample(true);
                             notify::toggle_center(st.notif.center, cx);
                             InvalidateRect(hwnd, std::ptr::null(), 0);
                         }
-                        _ => tray::toggle_quick(st.quick, cx, &st.tray.snap),
+                        _ => {
+                            st.tray.sample(true);
+                            tray::toggle_quick(st.quick, cx, &st.tray.snap);
+                        }
                     }
                     return 0;
                 }
@@ -842,6 +943,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 // Botón derecho sobre la bandeja: la página de ajustes que toque.
                 if let Some(i) = st.tray.hit(x, y) {
                     match st.tray.items[i].kind {
+                        tray::Kind::App(j) => {
+                            if let Some(a) = st.tray.apps.get(j) {
+                                let mut pt = POINT { x, y };
+                                windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+                                crate::traynotify::forward_click(a, WM_RBUTTONUP, pt.x, pt.y);
+                            }
+                        }
                         tray::Kind::Volume => {
                             ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
                                           ui::wide("ms-settings:sound").as_ptr(), std::ptr::null(),
@@ -871,6 +979,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_DESTROY => {
+            unregister_hotkeys(hwnd);
             // libera la reserva del área de trabajo
             let mut abd: APPBARDATA = std::mem::zeroed();
             abd.cbSize = std::mem::size_of::<APPBARDATA>() as u32;
@@ -968,6 +1077,11 @@ pub fn run() -> i32 {
         let menu = startmenu::create(hinst);
         let quick = tray::create_quick(hinst);
         let notif = notify::create(hinst);
+        // El escritorio se crea antes que nada para que quede por debajo.
+        let desktop = crate::desktop::create(hinst);
+        ui::menu::register(hinst);
+        // Ventana Shell_TrayWnd: recoge los iconos de las aplicaciones.
+        crate::traynotify::create(hinst);
         let tip = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
             tip_class.as_ptr(),
@@ -991,6 +1105,7 @@ pub fn run() -> i32 {
             notif,
             tip,
             tray: Tray::new(),
+            desktop,
             tracking: false,
             last_net_up: None,
             last_charging: None,
@@ -1003,6 +1118,7 @@ pub fn run() -> i32 {
         apply_placement(&mut *raw, true);
         refresh_apps(&mut *raw);
         ShowWindow(hwnd, SW_SHOW);
+        register_hotkeys(hwnd);
         ui::apply_perf();
 
         let code = window::message_loop();

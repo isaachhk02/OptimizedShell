@@ -410,3 +410,138 @@ pub fn chrome_rects(w: i32) -> Chrome {
         title_h,
     }
 }
+
+// ------------------------------------------------------------ imágenes
+// Carga de mapas de bits (fondos de escritorio y sus miniaturas). GDI+ ya sabe
+// leer JPG, PNG, BMP y GIF, así que no hace falta ningún decodificador aparte.
+
+/// Imagen GDI+ con liberación automática.
+pub struct Image {
+    img: *mut GpImage,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Image {
+    /// Carga una imagen del disco. `None` si el archivo no existe o no se
+    /// reconoce el formato.
+    pub fn load(path: &str) -> Option<Image> {
+        unsafe {
+            let mut img: *mut GpImage = std::ptr::null_mut();
+            if GdipLoadImageFromFile(wide(path).as_ptr(), &mut img) != 0 || img.is_null() {
+                return None;
+            }
+            let mut w = 0u32;
+            let mut h = 0u32;
+            GdipGetImageWidth(img, &mut w);
+            GdipGetImageHeight(img, &mut h);
+            if w == 0 || h == 0 {
+                GdipDisposeImage(img);
+                return None;
+            }
+            Some(Image { img, width: w, height: h })
+        }
+    }
+
+    /// Miniatura del tamaño pedido (la genera GDI+, usando la incrustada en el
+    /// archivo si la hay: mucho más barato que escalar la imagen completa).
+    pub fn thumbnail(path: &str, w: u32, h: u32) -> Option<Image> {
+        unsafe {
+            let full = Image::load(path)?;
+            let mut thumb: *mut GpImage = std::ptr::null_mut();
+            let hr = GdipGetImageThumbnail(full.img, w, h, &mut thumb, 0, std::ptr::null_mut());
+            if hr != 0 || thumb.is_null() {
+                return Some(full);
+            }
+            let mut tw = 0u32;
+            let mut th = 0u32;
+            GdipGetImageWidth(thumb, &mut tw);
+            GdipGetImageHeight(thumb, &mut th);
+            Some(Image { img: thumb, width: tw, height: th })
+        }
+    }
+
+    pub fn aspect(&self) -> f32 {
+        self.width as f32 / self.height.max(1) as f32
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        if !self.img.is_null() {
+            unsafe { GdipDisposeImage(self.img) };
+        }
+    }
+}
+
+impl Gfx {
+    /// Dibuja una imagen estirada al rectángulo dado.
+    pub fn draw_image(&self, img: &Image, x: i32, y: i32, w: i32, h: i32) {
+        if img.img.is_null() || w <= 0 || h <= 0 {
+            return;
+        }
+        unsafe {
+            GdipDrawImageRectI(self.raw(), img.img, x, y, w, h);
+        }
+    }
+
+    /// Dibuja una imagen cubriendo el rectángulo sin deformarla: se recorta lo
+    /// que sobra (equivale al ajuste «Rellenar» de Windows).
+    ///
+    /// El recorte se añade al que ya hubiera (intersección) y se deshace al
+    /// terminar, para no pisar el recorte del área desplazable que lo rodea.
+    pub fn draw_image_cover(&self, img: &Image, x: i32, y: i32, w: i32, h: i32) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let want = w as f32 / h as f32;
+        let have = img.aspect();
+        let (dw, dh) = if have > want {
+            ((h as f32 * have) as i32, h)
+        } else {
+            (w, (w as f32 / have) as i32)
+        };
+        let state = self.save();
+        self.clip_intersect(x, y, w, h);
+        self.draw_image(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+        self.restore(state);
+    }
+
+    /// Guarda el estado del contexto (recorte y transformación).
+    pub fn save(&self) -> u32 {
+        unsafe {
+            let mut state: u32 = 0;
+            GdipSaveGraphics(self.raw(), &mut state);
+            state
+        }
+    }
+
+    /// Restaura un estado guardado con `save`.
+    pub fn restore(&self, state: u32) {
+        unsafe {
+            GdipRestoreGraphics(self.raw(), state);
+        }
+    }
+
+    /// Añade un rectángulo al recorte actual en vez de reemplazarlo.
+    pub fn clip_intersect(&self, x: i32, y: i32, w: i32, h: i32) {
+        unsafe {
+            GdipSetClipRectI(self.raw(), x, y, w, h, 1 /*CombineModeIntersect*/);
+        }
+    }
+
+    /// Dibuja la imagen entera dentro del rectángulo, sin recortar («Ajustar»).
+    pub fn draw_image_contain(&self, img: &Image, x: i32, y: i32, w: i32, h: i32) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let want = w as f32 / h as f32;
+        let have = img.aspect();
+        let (dw, dh) = if have > want {
+            (w, (w as f32 / have) as i32)
+        } else {
+            ((h as f32 * have) as i32, h)
+        };
+        self.draw_image(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+    }
+}

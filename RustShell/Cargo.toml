@@ -1,6 +1,6 @@
 [package]
 name = "optimized-shell"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "OptimizedShell: shell ligero para Windows (port a Rust, mínimo consumo)"
 build = "build.rs"
@@ -18,14 +18,18 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Registry",
     "Win32_System_Environment",
     "Win32_Security",
+    "Win32_System_Services",
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
     "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_IO",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Time",
     "Win32_System_Shutdown",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
