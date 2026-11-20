@@ -50,9 +50,23 @@ struct AppBtn {
     rect: RECT,
 }
 
+/// Icono anclado a la barra: se dibuja siempre, haya o no ventana abierta.
+struct PinBtn {
+    /// Lo que se abre al pulsarlo (ejecutable, acceso directo o carpeta).
+    path: String,
+    label: String,
+    /// Ventana del programa si ya está abierto (null si no lo está).
+    running: HWND,
+    /// Falso cuando el ajuste lo esconde o el programa ya tiene su botón.
+    visible: bool,
+    rect: RECT,
+}
+
 struct State {
     hwnd: HWND,
     apps: Vec<AppBtn>,
+    /// Iconos anclados, en el orden de taskbar.ini.
+    pins: Vec<PinBtn>,
     start_rc: RECT,
     clock_rc: RECT,
     /// -1 ninguno, -2 inicio, -3..=-7 bandeja (-3 - índice), >=0 índice de app.
@@ -75,8 +89,22 @@ fn tray_hover(i: usize) -> isize {
     -3 - i as isize
 }
 fn tray_hover_index(h: isize) -> Option<usize> {
-    if h <= -3 {
+    if h <= -3 && h > PIN_HOVER_BASE {
         Some((-3 - h) as usize)
+    } else {
+        None
+    }
+}
+
+/// Los iconos anclados usan el otro extremo del rango, para no pisar a la
+/// bandeja (-3 y siguientes) ni al botón Inicio (-2).
+const PIN_HOVER_BASE: isize = -1000;
+fn pin_hover(i: usize) -> isize {
+    PIN_HOVER_BASE - i as isize
+}
+fn pin_hover_index(h: isize) -> Option<usize> {
+    if h <= PIN_HOVER_BASE {
+        Some((PIN_HOVER_BASE - h) as usize)
     } else {
         None
     }
@@ -141,7 +169,95 @@ fn refresh_apps(st: &mut State) {
         c.borrow_mut().retain(|k, _| live.contains(k));
     });
     st.apps = apps;
+    refresh_pins(st);
     layout(st);
+}
+
+/// Ruta del ejecutable dueño de una ventana.
+fn window_exe(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return None;
+        }
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if proc.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(proc, 0, buf.as_mut_ptr(), &mut len);
+        windows_sys::Win32::Foundation::CloseHandle(proc);
+        if ok == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Nombre del archivo de una ruta, en minúsculas.
+fn file_name_lower(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// Relee taskbar.ini y marca qué anclados tienen ya una ventana abierta: así
+/// el icono anclado activa esa ventana en vez de lanzar otra copia.
+fn refresh_pins(st: &mut State) {
+    let c = config::current();
+    let paths = crate::apps::taskbar_pins();
+    let show = c.b(Id::BarraAnclados);
+    let keep = c.b(Id::BarraAncladosSiempre);
+    // Ejecutable de cada ventana de la barra (una sola consulta por ventana).
+    let windows: Vec<(HWND, String)> = st
+        .apps
+        .iter()
+        .map(|a| (a.hwnd, window_exe(a.hwnd).unwrap_or_default().to_lowercase()))
+        .collect();
+    st.pins = paths
+        .iter()
+        .map(|path| {
+            let exe = crate::apps::pin_exe_name(path);
+            let full = path.to_lowercase();
+            let running = windows
+                .iter()
+                .find(|(_, w)| !w.is_empty() && (*w == full || file_name_lower(w) == exe))
+                .map(|(h, _)| *h)
+                .unwrap_or(std::ptr::null_mut());
+            PinBtn {
+                label: crate::apps::pin_label(path),
+                path: path.clone(),
+                visible: show && (keep || running.is_null()),
+                running,
+                rect: er(),
+            }
+        })
+        .collect();
+}
+
+/// Pulsar un icono anclado: si el programa ya está abierto se trae su ventana
+/// (y se minimiza si ya estaba delante); si no, se lanza.
+fn activate_pin(st: &mut State, i: usize) {
+    let Some(p) = st.pins.get(i) else { return };
+    let win = p.running;
+    let path = p.path.clone();
+    unsafe {
+        if !win.is_null() && IsWindow(win) != 0 {
+            if GetForegroundWindow() == win {
+                ShowWindow(win, SW_MINIMIZE);
+            } else {
+                if IsIconic(win) != 0 {
+                    ShowWindow(win, SW_RESTORE);
+                }
+                SetForegroundWindow(win);
+            }
+            return;
+        }
+    }
+    crate::apps::open_pin(&path);
 }
 
 // ------------------------------------------------------------ iconos
@@ -293,21 +409,36 @@ fn layout(st: &mut State) {
     let gap = ui::s(6);
     let n = st.apps.len() as i32;
     let apps_w = (n * bw + (n - 1).max(0) * gap).max(0);
+    // Los iconos anclados van entre Inicio y los botones de las ventanas.
+    let pin_w = ui::s(44);
+    let m = st.pins.iter().filter(|p| p.visible).count() as i32;
+    let pins_w = (m * pin_w + (m - 1).max(0) * gap).max(0);
 
     let left_margin = ui::s(6);
     let right_edge = tray_left - if tray_left < st.clock_rc.left { ui::s(4) } else { ui::s(6) };
     let centered_start = c.b(Id::BarraInicioCentro);
+    let sep = ui::s(8);
+
+    // Ancho del bloque Inicio + anclados + ventanas, con separación solo entre
+    // las partes que existen.
+    let mut group = start_w;
+    if pins_w > 0 {
+        group += if group > 0 { sep } else { 0 } + pins_w;
+    }
+    if apps_w > 0 {
+        group += if group > 0 { sep } else { 0 } + apps_w;
+    }
 
     let (start_x, mut x) = if centered_start {
-        // Inicio y los botones forman un bloque centrado, como en Windows 11.
-        let group = start_w + if start_w > 0 && n > 0 { ui::s(8) } else { 0 } + apps_w;
+        // Inicio, anclados y botones forman un bloque centrado (Windows 11).
         let gx = (((left_margin + right_edge) - group) / 2).max(left_margin);
-        (gx, gx + start_w + if start_w > 0 && n > 0 { ui::s(8) } else { 0 })
+        (gx, gx + start_w + if start_w > 0 && (pins_w > 0 || apps_w > 0) { sep } else { 0 })
     } else {
         let gx = 0;
-        let first = start_w + if start_w > 0 { ui::s(8) } else { left_margin };
+        let first = start_w + if start_w > 0 { sep } else { left_margin };
+        let bloque = pins_w + if pins_w > 0 && apps_w > 0 { sep } else { 0 } + apps_w;
         let ax = if c.get(Id::BarraAlineacion) == 1 {
-            (((first + right_edge) - apps_w) / 2).max(first)
+            (((first + right_edge) - bloque) / 2).max(first)
         } else {
             first
         };
@@ -316,6 +447,17 @@ fn layout(st: &mut State) {
     st.start_rc = RECT { left: start_x, top: 0, right: start_x + start_w, bottom: h };
 
     let pad = (h / 8).max(ui::s(4));
+    for p in st.pins.iter_mut() {
+        if !p.visible {
+            p.rect = er();
+            continue;
+        }
+        p.rect = RECT { left: x, top: pad, right: (x + pin_w).min(right_edge), bottom: h - pad };
+        x += pin_w + gap;
+    }
+    if pins_w > 0 && apps_w > 0 {
+        x += sep - gap;
+    }
     for a in st.apps.iter_mut() {
         a.rect = RECT { left: x, top: pad, right: (x + bw).min(right_edge), bottom: h - pad };
         x += bw + gap;
@@ -369,6 +511,44 @@ fn paint(st: &State) {
                 _ => g.text_in("\u{E700}", sr.left as f32, sr.top as f32, (sr.right - sr.left) as f32,
                                (sr.bottom - sr.top) as f32, 16.0, false, s.accent, Align::Center,
                                Align::Center, true),
+            }
+        }
+        // ---- iconos anclados
+        let pin_isz = ui::s(c.get(Id::BarraAncladosTamano));
+        for (i, p) in st.pins.iter().enumerate() {
+            if !p.visible {
+                continue;
+            }
+            let r = p.rect;
+            if r.right <= r.left + ui::s(8) {
+                continue;
+            }
+            let running = !p.running.is_null();
+            let active = running && unsafe { GetForegroundWindow() } == p.running;
+            let bg = if st.hover == pin_hover(i) {
+                s.task_button_hover
+            } else if active {
+                s.task_button_active
+            } else {
+                s.task_button
+            };
+            g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32,
+                      (r.bottom - r.top) as f32, ui::sf(6.0), Some(bg), None);
+            let hgt = r.bottom - r.top;
+            let icon = crate::apps::icon(&p.path);
+            let ix = (r.left + r.right) / 2 - pin_isz / 2;
+            if icon.is_null() {
+                g.text_in("\u{E718}", r.left as f32, r.top as f32, (r.right - r.left) as f32,
+                          hgt as f32, 11.0, false, s.text_dim, Align::Center, Align::Center, true);
+            } else {
+                g.draw_hicon(icon, ix, r.top + (hgt - pin_isz) / 2, pin_isz);
+            }
+            // Punto o subrayado: el programa está abierto / en primer plano.
+            if running {
+                let uw = if active { ((r.right - r.left) / 3).max(ui::s(10)) } else { ui::s(5) };
+                let ux = (r.left + r.right) / 2 - uw / 2;
+                g.rounded(ux as f32, (r.bottom - ui::s(3)) as f32, uw as f32, ui::s(2) as f32,
+                          ui::sf(1.0), Some(s.accent), None);
             }
         }
         // ---- botones de las ventanas
@@ -508,6 +688,11 @@ fn tip_for(st: &State) -> Option<(String, i32)> {
         let r = st.tray.items.get(i)?.rect;
         return Some((st.tray.tooltip(i), (r.left + r.right) / 2));
     }
+    if let Some(i) = pin_hover_index(st.hover) {
+        let p = st.pins.get(i)?;
+        let sufijo = if p.running.is_null() { "" } else { " (abierto)" };
+        return Some((format!("{}{}", p.label, sufijo), (p.rect.left + p.rect.right) / 2));
+    }
     if st.hover == -2 {
         return Some(("Inicio".to_string(), (st.start_rc.left + st.start_rc.right) / 2));
     }
@@ -620,6 +805,100 @@ pub fn launch_own(args: &str) {
 
 fn toggle_menu(st: &State) {
     startmenu::toggle(st.menu, st.hwnd);
+}
+
+/// Vuelve a leer los anclados y repinta (después de anclar o desanclar).
+fn pins_changed(st: &mut State) {
+    refresh_pins(st);
+    layout(st);
+    ui::broadcast_config_changed();
+    unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+}
+
+/// Menú del botón derecho sobre un icono anclado.
+fn pin_menu(st: &mut State, i: usize, sx: i32, sy: i32) {
+    let Some(p) = st.pins.get(i) else { return };
+    let (path, label, win) = (p.path.clone(), p.label.clone(), p.running);
+    let abierto = !win.is_null();
+    let items = vec![
+        ui::menu::Item::header(&label),
+        ui::menu::Item::new(1, if abierto { "Nueva ventana" } else { "Abrir" }).glyph("\u{E8A7}"),
+        ui::menu::Item::new(2, "Ejecutar como administrador").glyph("\u{E7EF}"),
+        ui::menu::Item::new(3, "Abrir la ubicación del archivo").glyph("\u{EC50}"),
+        ui::menu::Item::sep(),
+        ui::menu::Item::new(4, "Cerrar la ventana").glyph("\u{E8BB}").enabled(abierto),
+        ui::menu::Item::new(5, "Desanclar de la barra de tareas").glyph("\u{E77A}").danger(),
+    ];
+    match ui::menu::popup(st.hwnd, sx, sy, items) {
+        1 => crate::apps::open_pin(&path),
+        2 => crate::apps::launch_elevated(&path),
+        3 => {
+            if let Some(dir) = crate::apps::parent_dir(&path) {
+                launch_own(&format!("--explorer {}", dir));
+            }
+        }
+        4 => {
+            if abierto {
+                unsafe { PostMessageW(win, WM_CLOSE, 0, 0) };
+            }
+        }
+        5 => {
+            crate::apps::taskbar_unpin(&path);
+            pins_changed(st);
+        }
+        _ => {}
+    }
+}
+
+/// Menú del botón derecho sobre el botón de una ventana abierta.
+fn app_menu(st: &mut State, i: usize, sx: i32, sy: i32) {
+    let Some(a) = st.apps.get(i) else { return };
+    let (win, title) = (a.hwnd, a.title.clone());
+    let exe = window_exe(win);
+    let anclado = exe.as_deref().map(crate::apps::taskbar_is_pinned).unwrap_or(false);
+    let mut items = vec![
+        ui::menu::Item::header(&title),
+        ui::menu::Item::new(1, "Traer al frente").glyph("\u{E8A7}"),
+        ui::menu::Item::new(2, "Minimizar").glyph("\u{E921}"),
+        ui::menu::Item::new(3, "Maximizar").glyph("\u{E922}"),
+    ];
+    if exe.is_some() {
+        items.push(ui::menu::Item::sep());
+        items.push(
+            ui::menu::Item::new(4, if anclado {
+                "Desanclar de la barra de tareas"
+            } else {
+                "Anclar a la barra de tareas"
+            })
+            .glyph("\u{E718}"),
+        );
+    }
+    items.push(ui::menu::Item::sep());
+    items.push(ui::menu::Item::new(5, "Cerrar").glyph("\u{E8BB}").danger());
+    match ui::menu::popup(st.hwnd, sx, sy, items) {
+        1 => unsafe {
+            if IsIconic(win) != 0 {
+                ShowWindow(win, SW_RESTORE);
+            }
+            SetForegroundWindow(win);
+        },
+        2 => unsafe {
+            ShowWindow(win, SW_MINIMIZE);
+        },
+        3 => unsafe {
+            ShowWindow(win, if IsZoomed(win) != 0 { SW_RESTORE } else { SW_MAXIMIZE });
+        },
+        4 => {
+            if let Some(path) = exe {
+                crate::apps::taskbar_toggle_pin(&path);
+                pins_changed(st);
+            }
+        }
+        5 => unsafe {
+            PostMessageW(win, WM_CLOSE, 0, 0);
+        },
+        _ => {}
+    }
 }
 
 // ------------------------------------------------------------ atajos globales
@@ -750,6 +1029,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let st = &mut *st_ptr;
             // El icono del botón Inicio puede haber cambiado de origen.
             START_ICON.with(|c| *c.borrow_mut() = None);
+            refresh_pins(st);
             apply_placement(st, false);
             register_hotkeys(hwnd);
             ui::apply_perf();
@@ -844,6 +1124,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     hov = -2;
                 } else if let Some(i) = st.tray.hit(x, y) {
                     hov = tray_hover(i);
+                } else if let Some(i) = st.pins.iter().position(|p| p.visible && in_rect(&p.rect, x, y)) {
+                    hov = pin_hover(i);
                 } else {
                     for (i, a) in st.apps.iter().enumerate() {
                         if in_rect(&a.rect, x, y) {
@@ -925,6 +1207,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                     return 0;
                 }
+                if let Some(i) = st.pins.iter().position(|p| p.visible && in_rect(&p.rect, x, y)) {
+                    activate_pin(st, i);
+                    return 0;
+                }
                 for a in &st.apps {
                     if in_rect(&a.rect, x, y) {
                         // Pulsar la ventana en primer plano la minimiza, como el shell real.
@@ -944,8 +1230,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_RBUTTONUP => {
             if !st_ptr.is_null() {
-                let st = &*st_ptr;
+                let st = &mut *st_ptr;
                 let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+                // Menús de los iconos anclados y de los botones de ventana.
+                let pin = st.pins.iter().position(|p| p.visible && in_rect(&p.rect, x, y));
+                let app = st.apps.iter().position(|a| in_rect(&a.rect, x, y));
+                if pin.is_some() || app.is_some() {
+                    let mut pt = POINT { x, y };
+                    windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+                    hide_tip(st);
+                    if let Some(i) = pin {
+                        pin_menu(st, i, pt.x, pt.y);
+                    } else if let Some(i) = app {
+                        app_menu(st, i, pt.x, pt.y);
+                    }
+                    return 0;
+                }
                 // Botón derecho sobre la bandeja: la página de ajustes que toque.
                 if let Some(i) = st.tray.hit(x, y) {
                     match st.tray.items[i].kind {
@@ -956,18 +1256,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                                 crate::traynotify::forward_click(a, WM_RBUTTONUP, pt.x, pt.y);
                             }
                         }
-                        tray::Kind::Volume => {
-                            ui::shell_open("ms-settings:sound");
-                        }
-                        tray::Kind::Net => {
-                            ui::shell_open("ms-settings:network-status");
-                        }
-                        tray::Kind::Bluetooth => {
-                            ui::shell_open("ms-settings:bluetooth");
-                        }
-                        tray::Kind::Battery => {
-                            ui::shell_open("ms-settings:powersleep");
-                        }
+                        tray::Kind::Volume => launch_own("--settings sonido"),
+                        tray::Kind::Net => launch_own("--settings red"),
+                        tray::Kind::Bluetooth => launch_own("--settings bluetooth"),
+                        tray::Kind::Battery => launch_own("--settings energia"),
                         tray::Kind::Bell => launch_own("--settings notificaciones"),
                     }
                     return 0;
@@ -1095,6 +1387,7 @@ pub fn run() -> i32 {
         let st = Box::new(State {
             hwnd,
             apps: Vec::new(),
+            pins: Vec::new(),
             start_rc: er(),
             clock_rc: er(),
             hover: -1,

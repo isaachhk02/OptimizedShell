@@ -124,9 +124,13 @@ pub enum Id {
     // Actualizaciones
     ActualizarAuto,
     ActualizarCadaDias,
+    // Iconos anclados a la barra de tareas
+    BarraAnclados,
+    BarraAncladosSiempre,
+    BarraAncladosTamano,
 }
 
-pub const COUNT: usize = Id::ActualizarCadaDias as usize + 1;
+pub const COUNT: usize = Id::BarraAncladosTamano as usize + 1;
 
 /// Página de la ventana de Configuración a la que pertenece cada ajuste.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -503,6 +507,18 @@ pub static ITEMS: &[Item] = &[
         key: "CadaDias", label: "Cada",
         help: "Días que pasan entre una comprobación y la siguiente.",
         kind: Kind::Int { min: 1, max: 30, step: 1, unit: " días" }, def: 1 },
+    // ------------------------------------------- anclados de la barra
+    Item { id: Id::BarraAnclados, page: Page::Barra, section: BARRA, key: "Anclados",
+        label: "Mostrar los iconos anclados",
+        help: "Los programas anclados aparecen siempre en la barra, antes de las ventanas abiertas.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BarraAncladosSiempre, page: Page::Barra, section: BARRA, key: "AncladosSiempre",
+        label: "Mantener el icono anclado con el programa abierto",
+        help: "Desactivado, el icono anclado desaparece mientras el programa tiene ventana propia en la barra.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BarraAncladosTamano, page: Page::Barra, section: BARRA, key: "AncladosTamano",
+        label: "Tamaño de los iconos anclados", help: "",
+        kind: Kind::Int { min: 14, max: 32, step: 1, unit: "px" }, def: 20 },
 ];
 
 pub fn item(id: Id) -> &'static Item {

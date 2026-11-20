@@ -1,17 +1,23 @@
 // Configuración del sistema (--settings), al estilo de la Configuración de
 // Windows 11.
 //
-// Estructura: barra lateral con buscador y categorías (Sistema, Bluetooth y
-// dispositivos, Red e Internet, Personalización, Aplicaciones, Accesibilidad,
-// Acerca de), página de inicio con la tarjeta del equipo y accesos a las
-// categorías, y páginas formadas por grupos de tarjetas.
+// Estructura: barra lateral con buscador y categorías (Sistema, Pantalla,
+// Bluetooth y dispositivos, Sonido, Red e Internet, Personalización, Barra de
+// tareas, Menú Inicio, Aplicaciones, Accesibilidad, Acerca de), página de
+// inicio con la tarjeta del equipo y accesos a las categorías, y páginas
+// formadas por grupos de tarjetas.
 //
 // Los controles no están escritos a mano: cada ajuste de `ui::config` se
 // dibuja según su tipo (interruptor, deslizador, control segmentado, tarjetas
 // de modo o selector de color), así que añadir una fila a `config::ITEMS` y
-// citarla en un grupo basta para que aparezca aquí. Junto a los ajustes
-// propios hay filas de información del equipo y accesos a las páginas de
-// Windows (ms-settings:) que OptimizedShell no reimplementa.
+// citarla en un grupo basta para que aparezca aquí.
+//
+// Lo que antes se delegaba en la Configuración de Windows (`ms-settings:`) se
+// lee y se escribe ahora con la API del sistema en `crate::winset`: planes de
+// energía, dispositivos de audio, Bluetooth, impresoras, ratón, teclado, redes
+// Wi-Fi, adaptadores, programas instalados, aplicaciones predeterminadas,
+// accesibilidad y pantalla de bloqueo. Cada una de esas listas es una fila
+// `Row::List(...)` y sus botones se resuelven con `winset::act`.
 //
 // Cada cambio se aplica al momento, se guarda en %APPDATA%\OptimizedShell\
 // config.ini y se difunde al resto de ventanas de OptimizedShell.
@@ -35,12 +41,13 @@ use crate::ui::config::{self, Config, Id, Item, Kind, Page};
 use crate::ui::gdip::{Align, Gfx};
 use crate::ui::theme::{self, ACCENT_PRESETS};
 use crate::ui::{self, window};
+use crate::winset::{self, Action as WAct, ListKind};
 
 // ============================================================ modelo de páginas
 /// Acción de una fila de enlace.
 #[derive(Clone, Copy, PartialEq)]
 enum Act {
-    /// Abre algo con el shell de Windows (ms-settings:, control.exe...).
+    /// Abre algo con el shell de Windows (una URL, un .cpl, un .msc...).
     Url(&'static str),
     /// Lanza OptimizedShell con estos argumentos.
     Own(&'static str),
@@ -72,6 +79,9 @@ enum Row {
     Gallery,
     /// Monitores, resoluciones y frecuencias.
     Displays,
+    /// Lista nativa del sistema (planes de energía, audio, Bluetooth...):
+    /// lo que antes era un enlace a `ms-settings:`.
+    List(ListKind),
 }
 
 struct Group {
@@ -102,45 +112,59 @@ static SISTEMA: &[Group] = &[
         Row::S(Id::NotifPosicion),
         Row::S(Id::NotifHistorial),
     ]},
-    Group { title: "Energía y rendimiento", rows: &[
+    Group { title: "Rendimiento", rows: &[
         Row::S(Id::Eco),
         Row::S(Id::LiberarMemoria),
-        Row::Info(InfoKind::Bateria),
-        Row::Link { glyph: "\u{E945}", title: "Energía y suspensión",
-                    sub: "Pantalla, suspensión y plan de energía de Windows",
-                    act: Act::Url("ms-settings:powersleep") },
     ]},
-    Group { title: "Herramientas", rows: &[
+    Group { title: "Energía y suspensión", rows: &[
+        Row::Info(InfoKind::Bateria),
+        Row::List(ListKind::Energia),
+    ]},
+    Group { title: "Herramientas de OptimizedShell", rows: &[
         Row::Link { glyph: "\u{E9D9}", title: "Administrador de tareas",
                     sub: "Procesos, rendimiento, inicio y servicios", act: Act::Own("--taskmgr") },
         Row::Link { glyph: "\u{EC50}", title: "Explorador de archivos",
                     sub: "Abre el explorador de OptimizedShell", act: Act::Own("--explorer C:\\") },
-        Row::Link { glyph: "\u{E7F8}", title: "Pantalla",
-                    sub: "Resolución, escala y varios monitores", act: Act::Url("ms-settings:display") },
-        Row::Link { glyph: "\u{E8D6}", title: "Sonido",
-                    sub: "Dispositivos de salida y entrada", act: Act::Url("ms-settings:sound") },
+    ]},
+    Group { title: "Herramientas de Windows", rows: &[
+        Row::List(ListKind::Herramientas),
+    ]},
+];
+
+// ------------------------------------------------------------ sonido
+static SONIDO: &[Group] = &[
+    Group { title: "Salida", rows: &[
+        Row::List(ListKind::Audio),
+    ]},
+    Group { title: "Entrada", rows: &[
+        Row::List(ListKind::AudioEntrada),
+    ]},
+    Group { title: "Área de notificación", rows: &[
+        Row::S(Id::BandejaSonido),
     ]},
 ];
 
 // ------------------------------------------------------------ dispositivos
 static DISPOSITIVOS: &[Group] = &[
-    Group { title: "Estado", rows: &[
+    Group { title: "Bluetooth", rows: &[
         Row::Info(InfoKind::Bluetooth),
-        Row::Info(InfoKind::Audio),
-    ]},
-    Group { title: "Área de notificación", rows: &[
+        Row::List(ListKind::Bluetooth),
         Row::S(Id::BandejaBluetooth),
-        Row::S(Id::BandejaSonido),
     ]},
-    Group { title: "Ajustes de Windows", rows: &[
-        Row::Link { glyph: "\u{E702}", title: "Bluetooth",
-                    sub: "Emparejar y administrar dispositivos", act: Act::Url("ms-settings:bluetooth") },
-        Row::Link { glyph: "\u{E749}", title: "Impresoras y escáneres",
-                    sub: "", act: Act::Url("ms-settings:printers") },
-        Row::Link { glyph: "\u{E962}", title: "Mouse y panel táctil",
-                    sub: "", act: Act::Url("ms-settings:mousetouchpad") },
-        Row::Link { glyph: "\u{E765}", title: "Teclado e idioma",
-                    sub: "", act: Act::Url("ms-settings:keyboard") },
+    Group { title: "Impresoras", rows: &[
+        Row::List(ListKind::Impresoras),
+    ]},
+    Group { title: "Ratón", rows: &[
+        Row::List(ListKind::Raton),
+    ]},
+    Group { title: "Teclado", rows: &[
+        Row::List(ListKind::Teclado),
+    ]},
+    Group { title: "Audio", rows: &[
+        Row::Info(InfoKind::Audio),
+        Row::Link { glyph: "\u{E767}", title: "Sonido",
+                    sub: "Dispositivos de salida y entrada, volumen y silencio",
+                    act: Act::Own("--settings sonido") },
     ]},
 ];
 
@@ -148,20 +172,13 @@ static DISPOSITIVOS: &[Group] = &[
 static RED: &[Group] = &[
     Group { title: "Estado", rows: &[
         Row::Info(InfoKind::Red),
-    ]},
-    Group { title: "Área de notificación", rows: &[
         Row::S(Id::BandejaRed),
     ]},
-    Group { title: "Ajustes de Windows", rows: &[
-        Row::Link { glyph: "\u{E701}", title: "Wi-Fi",
-                    sub: "Redes disponibles y redes conocidas", act: Act::Url("ms-settings:network-wifi") },
-        Row::Link { glyph: "\u{E839}", title: "Ethernet",
-                    sub: "", act: Act::Url("ms-settings:network-ethernet") },
-        Row::Link { glyph: "\u{E968}", title: "Configuración de red avanzada",
-                    sub: "Adaptadores, uso de datos y restablecimiento",
-                    act: Act::Url("ms-settings:network-advancedsettings") },
-        Row::Link { glyph: "\u{E72E}", title: "Conexiones de red (clásico)",
-                    sub: "Panel de control", act: Act::Url("ncpa.cpl") },
+    Group { title: "Redes Wi-Fi", rows: &[
+        Row::List(ListKind::Wifi),
+    ]},
+    Group { title: "Adaptadores", rows: &[
+        Row::List(ListKind::Adaptadores),
     ]},
 ];
 
@@ -194,12 +211,8 @@ static PERSONALIZACION: &[Group] = &[
         Row::S(Id::EscritorioColor),
         Row::S(Id::EscritorioActivo),
     ]},
-    Group { title: "Ajustes de Windows", rows: &[
-        Row::Link { glyph: "\u{E91B}", title: "Más opciones de fondo",
-                    sub: "Presentación, color sólido y temas de Windows",
-                    act: Act::Url("ms-settings:personalization-background") },
-        Row::Link { glyph: "\u{E770}", title: "Pantalla de bloqueo",
-                    sub: "", act: Act::Url("ms-settings:lockscreen") },
+    Group { title: "Pantalla de bloqueo", rows: &[
+        Row::List(ListKind::Bloqueo),
     ]},
 ];
 
@@ -234,13 +247,6 @@ static PANTALLA: &[Group] = &[
         Row::S(Id::EscritorioEtiquetas),
         Row::S(Id::EscritorioOrden),
     ]},
-    Group { title: "Ajustes de Windows", rows: &[
-        Row::Link { glyph: "\u{E7F8}", title: "Opciones avanzadas de pantalla",
-                    sub: "HDR, escala de Windows y varios monitores",
-                    act: Act::Url("ms-settings:display") },
-        Row::Link { glyph: "\u{E713}", title: "Configuración de gráficos",
-                    sub: "", act: Act::Url("ms-settings:display-advancedgraphics") },
-    ]},
 ];
 
 // ------------------------------------------------------------ barra de tareas
@@ -251,6 +257,12 @@ static BARRA: &[Group] = &[
         Row::S(Id::BarraReservarArea),
         Row::S(Id::BarraSiempreVisible),
         Row::S(Id::BarraRefresco),
+    ]},
+    Group { title: "Iconos anclados", rows: &[
+        Row::S(Id::BarraAnclados),
+        Row::S(Id::BarraAncladosSiempre),
+        Row::S(Id::BarraAncladosTamano),
+        Row::List(ListKind::Anclados),
     ]},
     Group { title: "Botón Inicio", rows: &[
         Row::S(Id::BarraMostrarInicio),
@@ -327,13 +339,11 @@ static APLICACIONES: &[Group] = &[
         Row::S(Id::PerfPorNucleo),
         Row::S(Id::PerfHistorial),
     ]},
-    Group { title: "Ajustes de Windows", rows: &[
-        Row::Link { glyph: "\u{E71D}", title: "Aplicaciones instaladas",
-                    sub: "", act: Act::Url("ms-settings:appsfeatures") },
-        Row::Link { glyph: "\u{E8FC}", title: "Aplicaciones predeterminadas",
-                    sub: "", act: Act::Url("ms-settings:defaultapps") },
-        Row::Link { glyph: "\u{E713}", title: "Panel de control",
-                    sub: "Herramientas clásicas de Windows", act: Act::Url("control.exe") },
+    Group { title: "Aplicaciones predeterminadas", rows: &[
+        Row::List(ListKind::Predeterminadas),
+    ]},
+    Group { title: "Programas instalados", rows: &[
+        Row::List(ListKind::Programas),
     ]},
 ];
 
@@ -349,9 +359,8 @@ static ACCESIBILIDAD: &[Group] = &[
         Row::S(Id::Desenfoque),
         Row::S(Id::OpacidadVentanas),
     ]},
-    Group { title: "Ajustes de Windows", rows: &[
-        Row::Link { glyph: "\u{E7F8}", title: "Accesibilidad de Windows",
-                    sub: "Lupa, narrador, contraste alto", act: Act::Url("ms-settings:easeofaccess") },
+    Group { title: "Opciones de Windows", rows: &[
+        Row::List(ListKind::Accesibilidad),
     ]},
 ];
 
@@ -391,14 +400,17 @@ static ACERCA: &[Group] = &[
 static NAV: &[NavPage] = &[
     NavPage { glyph: "\u{E80F}", title: "Inicio", sub: "", arg: "inicio", reset: None, groups: &[] },
     NavPage { glyph: "\u{E770}", title: "Sistema",
-        sub: "Notificaciones, energía, rendimiento y herramientas",
+        sub: "Notificaciones, energía, planes, rendimiento y herramientas",
         arg: "sistema", reset: Some(Page::Notificaciones), groups: SISTEMA },
     NavPage { glyph: "\u{E7F8}", title: "Pantalla",
         sub: "Resolución, frecuencia y orientación de los monitores",
         arg: "pantalla", reset: Some(Page::Escritorio), groups: PANTALLA },
     NavPage { glyph: "\u{E702}", title: "Bluetooth y dispositivos",
-        sub: "Bluetooth, sonido, impresoras y periféricos",
+        sub: "Bluetooth, impresoras, ratón y teclado",
         arg: "bluetooth", reset: None, groups: DISPOSITIVOS },
+    NavPage { glyph: "\u{E767}", title: "Sonido",
+        sub: "Dispositivos de salida y entrada, volumen y silencio",
+        arg: "sonido", reset: None, groups: SONIDO },
     NavPage { glyph: "\u{E701}", title: "Red e Internet",
         sub: "Wi-Fi, Ethernet y estado de la conexión",
         arg: "red", reset: None, groups: RED },
@@ -412,7 +424,7 @@ static NAV: &[NavPage] = &[
         sub: "Tamaño, búsqueda y contenido del menú",
         arg: "menu", reset: Some(Page::Menu), groups: MENU },
     NavPage { glyph: "\u{E71D}", title: "Aplicaciones",
-        sub: "Explorador, administrador de tareas y listas",
+        sub: "Programas instalados, predeterminadas y listas",
         arg: "aplicaciones", reset: Some(Page::Listas), groups: APLICACIONES },
     NavPage { glyph: "\u{E776}", title: "Accesibilidad",
         sub: "Tamaño del texto, contraste y efectos",
@@ -429,11 +441,15 @@ fn page_for_arg(arg: &str) -> usize {
         return i;
     }
     match a.as_str() {
-        "notificaciones" | "rendimiento" => 1,
-        "listas" | "explorador" => index_of("aplicaciones"),
-        "fondo" | "apariencia" | "tema" => index_of("personalizacion"),
-        "bandeja" | "barra de tareas" => index_of("barra"),
+        "notificaciones" | "rendimiento" | "energia" | "energía" => 1,
+        "listas" | "explorador" | "programas" | "predeterminadas" => index_of("aplicaciones"),
+        "fondo" | "apariencia" | "tema" | "bloqueo" => index_of("personalizacion"),
+        "bandeja" | "barra de tareas" | "anclados" => index_of("barra"),
         "escritorio" => index_of("pantalla"),
+        "audio" | "volumen" => index_of("sonido"),
+        "wifi" | "wi-fi" | "adaptadores" => index_of("red"),
+        "dispositivos" | "impresoras" | "raton" | "ratón" | "teclado" => index_of("bluetooth"),
+        "herramientas" => 1,
         _ => 0,
     }
 }
@@ -464,6 +480,8 @@ enum Hit {
     Resolution(usize),
     Rate(usize),
     Rotate(u32),
+    /// Botón de una fila de una lista nativa: lista, fila y botón.
+    ListAct(ListKind, usize, u8),
     Toggle(Id),
     Choice(Id, i32),
     Slider(Id, u8),
@@ -482,6 +500,7 @@ enum BlockKind {
     Info(InfoKind),
     Gallery,
     Displays,
+    List(ListKind),
 }
 
 // ------------------------------------------------------- galería de fondos
@@ -556,6 +575,9 @@ struct State {
     /// Monitor que se está ajustando y mensaje del último cambio.
     display_sel: usize,
     display_msg: Option<String>,
+    /// Listas nativas ya leídas y el mensaje del último botón pulsado.
+    lists: std::collections::HashMap<ListKind, Vec<winset::Entry>>,
+    msgs: std::collections::HashMap<ListKind, String>,
     // layout
     x0: i32,
     cw: i32,
@@ -698,6 +720,50 @@ fn block_height(it: &Item, cw: i32) -> i32 {
 
 fn link_height() -> i32 {
     ui::s(60)
+}
+
+// ------------------------------------------------------- listas nativas
+fn list_row_h() -> i32 {
+    ui::s(58)
+}
+
+fn list_gap() -> i32 {
+    ui::s(6)
+}
+
+/// Alto del bloque de una lista: sus filas más el mensaje, si hay.
+fn list_height(st: &State, kind: ListKind) -> i32 {
+    let n = st.lists.get(&kind).map(|v| v.len()).unwrap_or(0) as i32;
+    let msg = st.msgs.get(&kind).map(|m| !m.is_empty()).unwrap_or(false);
+    (n * (list_row_h() + list_gap())).max(list_row_h()) + if msg { ui::s(26) } else { 0 }
+}
+
+fn list_row_rect(r: &RECT, i: usize) -> RECT {
+    rect(r.left, r.top + i as i32 * (list_row_h() + list_gap()), rw(r), list_row_h())
+}
+
+/// Ancho del botón de una fila (los de glifo son cuadrados).
+fn list_btn_w(a: WAct) -> i32 {
+    if a.is_glyph() {
+        ui::s(30)
+    } else {
+        (ui::s(20) + a.label().chars().count() as i32 * ui::s(7)).max(ui::s(62))
+    }
+}
+
+/// Botones de una fila, de derecha a izquierda pero devueltos en orden.
+fn list_btn_rects(row: &RECT, acts: &[WAct]) -> Vec<RECT> {
+    let h = ui::s(30);
+    let y = row.top + (rh(row) - h) / 2;
+    let mut x = row.right - ui::s(12);
+    let mut out = vec![er(); acts.len()];
+    for (i, a) in acts.iter().enumerate().rev() {
+        let w = list_btn_w(*a);
+        x -= w;
+        out[i] = rect(x, y, w, h);
+        x -= ui::s(6);
+    }
+    out
 }
 fn header_height() -> i32 {
     ui::s(38)
@@ -981,6 +1047,22 @@ fn layout(st: &mut State) {
     st.reset_all_rc = rect(st.x0 + bw + ui::s(10), by, ui::s(140), ui::s(32));
     st.open_ini_rc = rect(st.x0 + bw + ui::s(160), by, ui::s(150), ui::s(32));
 
+    // Las listas nativas de la página se leen del sistema una sola vez.
+    if st.search.trim().is_empty() {
+        let kinds: Vec<ListKind> = NAV[st.page]
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .filter_map(|r| if let Row::List(k) = r { Some(*k) } else { None })
+            .collect();
+        for k in kinds {
+            if !st.lists.contains_key(&k) {
+                let v = winset::entries(k);
+                st.lists.insert(k, v);
+            }
+        }
+    }
+
     st.blocks.clear();
     st.links.clear();
     st.tiles.clear();
@@ -1057,6 +1139,11 @@ fn layout(st: &mut State) {
                         st.blocks.push(Block { kind: BlockKind::Displays, rect: rect(st.x0, y, st.cw, h) });
                         y += h + gap;
                     }
+                    Row::List(k) => {
+                        let h = list_height(st, *k);
+                        st.blocks.push(Block { kind: BlockKind::List(*k), rect: rect(st.x0, y, st.cw, h) });
+                        y += h + gap;
+                    }
                 }
             }
             y += ui::s(8);
@@ -1087,6 +1174,16 @@ fn layout(st: &mut State) {
             BlockKind::Displays => {
                 for (h, hr) in displays_hits(st, &r) {
                     st.hits.push((hr, h));
+                }
+            }
+            BlockKind::List(k) => {
+                if let Some(entries) = st.lists.get(k) {
+                    for (i, e) in entries.iter().enumerate() {
+                        let row = list_row_rect(&r, i);
+                        for (j, br) in list_btn_rects(&row, &e.actions).into_iter().enumerate() {
+                            st.hits.push((br, Hit::ListAct(*k, i, j as u8)));
+                        }
+                    }
                 }
             }
             BlockKind::Setting(it) => {
@@ -1256,6 +1353,7 @@ fn paint(st: &State) {
                 }
                 BlockKind::Gallery => paint_gallery(g, &s, st, &r),
                 BlockKind::Displays => paint_displays(g, &s, st, &r),
+                BlockKind::List(k) => paint_list(g, &s, st, *k, &r),
             }
         }
         g.reset_clip();
@@ -1454,6 +1552,60 @@ fn paint_displays(g: &Gfx, s: &theme::Style, st: &State, r: &RECT) {
 }
 
 /// Fila de tarjeta con icono, título y valor (enlaces e información).
+/// Una lista nativa: una tarjeta por fila, con sus botones a la derecha y el
+/// mensaje del último cambio debajo.
+fn paint_list(g: &Gfx, s: &theme::Style, st: &State, kind: ListKind, r: &RECT) {
+    let Some(entries) = st.lists.get(&kind) else { return };
+    if entries.is_empty() {
+        g.text_in("Nada que enseñar aquí.", r.left as f32, r.top as f32, rw(r) as f32,
+                  list_row_h() as f32, 12.0, false, s.text_faint, Align::Near, Align::Center, false);
+        return;
+    }
+    for (i, e) in entries.iter().enumerate() {
+        let row = list_row_rect(r, i);
+        if row.bottom < st.content_rc.top || row.top > st.content_rc.bottom {
+            continue;
+        }
+        let activa = e.on == Some(true);
+        g.rounded(row.left as f32, row.top as f32, rw(&row) as f32, rh(&row) as f32, ui::sf(8.0),
+                  Some(s.card_bg),
+                  Some((if activa { s.accent } else { s.card_border }, if activa { 1.4 } else { 1.0 })));
+        g.text_in(e.glyph, (row.left + ui::s(12)) as f32, row.top as f32, ui::s(28) as f32,
+                  rh(&row) as f32, 12.5, false,
+                  if activa { s.accent } else { s.text_dim }, Align::Center, Align::Center, true);
+        // El texto llega hasta el primer botón.
+        let btns = list_btn_rects(&row, &e.actions);
+        let limit = btns.first().map(|b| b.left - ui::s(10)).unwrap_or(row.right - ui::s(12));
+        let tx = row.left + ui::s(48);
+        let tw = (limit - tx).max(ui::s(60));
+        if e.sub.is_empty() {
+            g.text_in(&e.title, tx as f32, row.top as f32, tw as f32, rh(&row) as f32, 12.5, false,
+                      s.text, Align::Near, Align::Center, false);
+        } else {
+            g.text_in(&e.title, tx as f32, (row.top + ui::s(9)) as f32, tw as f32, ui::s(20) as f32,
+                      12.5, false, s.text, Align::Near, Align::Center, false);
+            g.text_in(&e.sub, tx as f32, (row.top + ui::s(29)) as f32, tw as f32, ui::s(18) as f32,
+                      11.0, false, s.text_dim, Align::Near, Align::Center, false);
+        }
+        for (j, br) in btns.iter().enumerate() {
+            let a = e.actions[j];
+            let hov = st.hover == Hit::ListAct(kind, i, j as u8);
+            if a.is_glyph() {
+                small_btn(g, s, *br, a.label(), hov);
+            } else {
+                draw_button(g, s, *br, a.label(), hov, a == WAct::Usar);
+            }
+        }
+    }
+    if let Some(msg) = st.msgs.get(&kind) {
+        if !msg.is_empty() {
+            let y = r.top + entries.len() as i32 * (list_row_h() + list_gap());
+            g.text_in(msg, (r.left + ui::s(4)) as f32, y as f32, rw(r) as f32, ui::s(22) as f32,
+                      11.5, false, s.accent, Align::Near, Align::Center, false);
+        }
+    }
+}
+
 fn paint_link(g: &Gfx, s: &theme::Style, r: &RECT, glyph: &str, title: &str, sub: &str, hov: bool,
               chevron: bool) {
     g.rounded(r.left as f32, r.top as f32, rw(r) as f32, rh(r) as f32, ui::sf(8.0),
@@ -1738,6 +1890,9 @@ fn open_ini() {
 
 fn goto(st: &mut State, page: usize) {
     st.page = page.min(NAV.len() - 1);
+    // Las listas nativas se vuelven a leer al entrar en la página.
+    st.lists.clear();
+    st.msgs.clear();
     st.scroll = 0;
     st.hover = Hit::None;
     st.search.clear();
@@ -1783,6 +1938,21 @@ fn click(st: &mut State, x: i32, y: i32) {
                                                       home.trim_end_matches('\\')));
                 }
                 Act::Own(a) => crate::shell::launch_own(a),
+            }
+        }
+        Hit::ListAct(kind, i, j) => {
+            // El botón actúa sobre el sistema y la lista se relee enseguida:
+            // así se ve el estado nuevo (predeterminado, valor, conexión...).
+            let entry = st.lists.get(&kind).and_then(|v| v.get(i))
+                .map(|e| (e.key.clone(), e.actions.get(j as usize).copied()));
+            if let Some((key, Some(action))) = entry {
+                let msg = winset::act(kind, i, &key, action, hwnd).unwrap_or_default();
+                st.msgs.insert(kind, msg);
+                let fresh = winset::entries(kind);
+                st.lists.insert(kind, fresh);
+                st.hover = Hit::None;
+                layout(st);
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
             }
         }
         Hit::Toggle(id) => {
@@ -2133,6 +2303,8 @@ pub fn run() -> i32 {
             displays: display::displays(),
             display_sel: 0,
             display_msg: None,
+            lists: std::collections::HashMap::new(),
+            msgs: std::collections::HashMap::new(),
             x0: 0,
             cw: 0,
             content_rc: er(),

@@ -49,6 +49,18 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
 - **Botón Inicio** con el logotipo de Windows extraído de `shell32.dll` (o de
   `imageres.dll`, un glifo o un logotipo dibujado con el color de acento), a la
   izquierda o **centrado junto a los botones de ventana**, como en Windows 11.
+- **Iconos anclados**: los programas anclados se dibujan siempre entre el botón
+  Inicio y los botones de ventana, con el icono real del shell. Pulsarlos abre
+  el programa o, si ya está abierto, trae su ventana al frente (y la minimiza
+  al volver a pulsar). Un punto bajo el icono avisa de que está en ejecución y
+  el subrayado de acento, de que es la ventana en primer plano. El botón
+  derecho da «Abrir», «Ejecutar como administrador», «Abrir la ubicación»,
+  «Cerrar la ventana» y «Desanclar»; sobre un botón de ventana aparece además
+  «Anclar a la barra de tareas». Se guardan por ruta y en orden en
+  `%APPDATA%\OptimizedShell\taskbar.ini`, y la página *Barra de tareas* de la
+  Configuración permite anclar con «Examinar...», reordenar y desanclar. Hay
+  ajustes para esconderlos, para mantener el icono anclado mientras el programa
+  tiene ventana propia y para su tamaño.
 - **Botones de ventana** con el icono real de cada aplicación (`WM_GETICON`, y si
   la ventana no declara ninguno, el del ejecutable), con o sin título, subrayado
   de la ventana en primer plano y minimizar al volver a pulsarla.
@@ -222,12 +234,41 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
   buscador que filtra **todos** los ajustes a la vez, página de inicio con la
   tarjeta del equipo (usuario, nombre del equipo y edición de Windows) y
   mosaicos de categoría, y páginas formadas por grupos de tarjetas: Sistema,
-  Bluetooth y dispositivos, Red e Internet, Personalización, Barra de tareas,
-  Menú Inicio, Aplicaciones, Accesibilidad y Acerca de. Junto a los ajustes
-  propios hay filas de información en vivo (procesador, RAM, conexión actual,
-  batería, Bluetooth, salida de audio) y accesos a las páginas de Windows
-  (`ms-settings:`) que OptimizedShell no reimplementa. Todo se guarda en
+  Pantalla, Bluetooth y dispositivos, Sonido, Red e Internet, Personalización,
+  Barra de tareas, Menú Inicio, Aplicaciones, Accesibilidad y Acerca de. Junto
+  a los ajustes propios hay filas de información en vivo (procesador, RAM,
+  conexión actual, batería, Bluetooth, salida de audio). Todo se guarda en
   `config.ini` y se aplica en caliente.
+  - *Sin `ms-settings:`*: lo que antes abría la Configuración de Windows se lee
+    y se escribe ahora con la API del sistema (`src/winset.rs`), en listas con
+    botones que actúan al momento:
+    - *Energía*: planes de energía (`powrprof`) con el activo marcado, tiempos
+      de apagado de pantalla y de suspensión con corriente y con batería, y
+      suspender o hibernar ahora.
+    - *Sonido*: dispositivos de salida y de entrada (Core Audio), cambio del
+      predeterminado (`IPolicyConfig`), volumen y silencio.
+    - *Bluetooth*: radios detectadas y dispositivos emparejados, con su clase y
+      su estado, y desemparejar (`BluetoothRemoveDevice`).
+    - *Impresoras*: `EnumPrinters`, predeterminada y cola de impresión.
+    - *Ratón y teclado*: velocidad del puntero, líneas de la rueda, doble clic,
+      botones intercambiados, tamaño del puntero, velocidad y retardo de
+      repetición, grosor e intermitencia del cursor y distribución activa.
+    - *Red*: adaptadores con su IP, puerta de enlace, DHCP y MAC
+      (`GetAdaptersInfo`), redes Wi-Fi al alcance con su señal (`wlanapi`),
+      conectar con un perfil guardado, desconectar, explorar y vaciar la caché
+      de DNS.
+    - *Aplicaciones*: programas instalados leídos del registro (nombre,
+      editor, versión y tamaño) con su desinstalador, y aplicación
+      predeterminada de los tipos y protocolos más usados
+      (`AssocQueryString` + `SHOpenWithDialog`).
+    - *Accesibilidad*: contraste alto, teclas especiales, filtro y de
+      alternancia, puntero con el teclado, avisos en pantalla, lupa, narrador
+      y teclado en pantalla.
+    - *Pantalla de bloqueo*: imagen de la de Windows (`PersonalizationCSP`, con
+      permiso de administrador) y la propia de OptimizedShell.
+    - *Herramientas de Windows*: administrador de dispositivos, discos, visor
+      de eventos, tareas, directivas, registro, limpieza, información del
+      sistema, cuentas y restauración.
   - *Fondo de escritorio*: galería con las miniaturas de las imágenes de
     Windows y de las del usuario (las genera GDI+ solo para las que se ven),
     botón «Examinar...» y ajuste de encaje.

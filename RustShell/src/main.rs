@@ -29,6 +29,7 @@ mod display;
 mod fileops;
 mod watcher;
 mod update;
+mod winset;
 
 use args::has_arg;
 

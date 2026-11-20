@@ -605,10 +605,6 @@ fn quick_btn(g: &Gfx, s: &theme::Style, r: RECT, glyph: &str, label: &str, hov: 
               11.5, false, s.text, Align::Near, Align::Center, false);
 }
 
-fn open_url(target: &str) {
-    ui::shell_open(target);
-}
-
 fn quick_hit(q: &Quick, x: i32, y: i32) -> QHit {
     for (i, (_, r)) in q.tiles.iter().enumerate() {
         if in_rect(r, x, y) {
@@ -718,7 +714,7 @@ unsafe extern "system" fn quick_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                                     }
                                     None => {
                                         ShowWindow(hwnd, SW_HIDE);
-                                        open_url("ms-settings:network");
+                                        crate::shell::launch_own("--settings red");
                                     }
                                 }
                             }
@@ -736,7 +732,7 @@ unsafe extern "system" fn quick_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                                     }
                                     None => {
                                         ShowWindow(hwnd, SW_HIDE);
-                                        open_url("ms-settings:bluetooth");
+                                        crate::shell::launch_own("--settings bluetooth");
                                     }
                                 }
                             }
@@ -758,11 +754,11 @@ unsafe extern "system" fn quick_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     }
                     QHit::NetRow => {
                         ShowWindow(hwnd, SW_HIDE);
-                        open_url("ms-settings:network-status");
+                        crate::shell::launch_own("--settings red");
                     }
                     QHit::BatteryRow => {
                         ShowWindow(hwnd, SW_HIDE);
-                        open_url("ms-settings:powersleep");
+                        crate::shell::launch_own("--settings sistema");
                     }
                     QHit::Settings => {
                         ShowWindow(hwnd, SW_HIDE);

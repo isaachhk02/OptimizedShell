@@ -269,3 +269,130 @@ pub fn parent_dir(path: &str) -> Option<String> {
         .parent()
         .map(|p| p.to_string_lossy().to_string())
 }
+
+// ------------------------------------------- anclados a la barra de tareas
+// Lista aparte de la del menú Inicio: se guarda en taskbar.ini, una ruta por
+// línea y en el orden en que se dibujan los iconos de la barra. Valen
+// ejecutables, accesos directos (.lnk/.url), carpetas y documentos: todo lo
+// que el shell sepa abrir.
+fn taskbar_file() -> PathBuf {
+    config::config_dir().join("taskbar.ini")
+}
+
+/// Rutas ancladas a la barra de tareas, en orden.
+pub fn taskbar_pins() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(taskbar_file()) else { return default_taskbar_pins() };
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with(';') && !l.starts_with('['))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Primeros iconos de una instalación nueva: los que trae cualquier Windows.
+fn default_taskbar_pins() -> Vec<String> {
+    let mut out = Vec::new();
+    let sys = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    for p in [format!(r"{}\explorer.exe", sys), format!(r"{}\System32\notepad.exe", sys)] {
+        if std::path::Path::new(&p).exists() {
+            out.push(p);
+        }
+    }
+    out
+}
+
+fn save_taskbar_pins(list: &[String]) {
+    let mut out = String::from(
+        "; Programas anclados a la barra de tareas de OptimizedShell.\n\
+         ; Una ruta por línea, en el orden en que se dibujan.\n[Anclados]\n");
+    for p in list {
+        out.push_str(p);
+        out.push('\n');
+    }
+    let _ = std::fs::create_dir_all(config::config_dir());
+    let _ = std::fs::write(taskbar_file(), out);
+}
+
+pub fn taskbar_is_pinned(path: &str) -> bool {
+    taskbar_pins().iter().any(|p| p.eq_ignore_ascii_case(path))
+}
+
+/// Ancla una ruta al final de la barra. Devuelve false si ya estaba.
+pub fn taskbar_pin(path: &str) -> bool {
+    let mut list = taskbar_pins();
+    if list.iter().any(|p| p.eq_ignore_ascii_case(path)) {
+        return false;
+    }
+    if list.len() >= 24 {
+        return false;
+    }
+    list.push(path.to_string());
+    save_taskbar_pins(&list);
+    true
+}
+
+pub fn taskbar_unpin(path: &str) {
+    let mut list = taskbar_pins();
+    list.retain(|p| !p.eq_ignore_ascii_case(path));
+    save_taskbar_pins(&list);
+}
+
+/// Ancla o desancla. Devuelve true si queda anclado.
+pub fn taskbar_toggle_pin(path: &str) -> bool {
+    if taskbar_is_pinned(path) {
+        taskbar_unpin(path);
+        false
+    } else {
+        taskbar_pin(path)
+    }
+}
+
+/// Mueve un icono anclado una posición a la izquierda (-1) o a la derecha (1).
+pub fn taskbar_move(index: usize, dir: i32) {
+    let mut list = taskbar_pins();
+    let target = index as i32 + dir;
+    if index >= list.len() || target < 0 || target as usize >= list.len() {
+        return;
+    }
+    list.swap(index, target as usize);
+    save_taskbar_pins(&list);
+}
+
+/// Nombre que se enseña para una ruta anclada (sin extensión ni carpeta).
+pub fn pin_label(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    p.file_stem()
+        .or_else(|| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Nombre del ejecutable al que apunta una ruta anclada, en minúsculas, para
+/// emparejar el icono anclado con las ventanas que ya estén abiertas.
+pub fn pin_exe_name(path: &str) -> String {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".lnk") || lower.ends_with(".url") {
+        // Del acceso directo solo se puede deducir el nombre: basta para
+        // emparejar "Firefox.lnk" con firefox.exe en la mayoría de casos.
+        return format!("{}.exe", pin_label(path).to_lowercase());
+    }
+    std::path::Path::new(&lower)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or(lower)
+}
+
+/// Abre una ruta anclada con el shell (ejecutable, acceso directo o carpeta).
+pub fn open_pin(path: &str) {
+    record_use(path);
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            ui::wide("open").as_ptr(),
+            ui::wide(path).as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
