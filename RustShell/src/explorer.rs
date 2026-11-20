@@ -662,7 +662,11 @@ fn delete_selection(st: &mut State, permanent: bool) {
     if paths.is_empty() {
         return;
     }
-    // Sin confirmación propia: la pone el shell, que además dice qué se borra.
+    // La confirmación la pone el ajuste «Confirmar al eliminar»; el shell
+    // añade la suya cuando Windows la tiene configurada.
+    if !fileops::confirm_delete(st.hwnd, &paths, permanent) {
+        return;
+    }
     let r = fileops::delete(st.hwnd, &paths, permanent);
     after_op(st, r);
 }

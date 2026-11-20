@@ -24,6 +24,16 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
   Rellenar/Ajustar/Expandir/Mosaico/Centrar, color de fondo y menú contextual.
   Se omite solo mientras el Explorador de Windows siga siendo el shell, para no
   taparle el escritorio real.
+- **Iconos del escritorio**: los esenciales (Este equipo, carpeta del usuario,
+  Papelera de reciclaje —con su icono de vacía o llena—, Red y Panel de
+  control) y todo lo que haya en las carpetas `Escritorio` del usuario y la
+  pública. Cada icono esencial tiene su interruptor, y hay ajustes de tamaño,
+  rótulos, orden (nombre, tipo, fecha, tamaño), archivos ocultos y refresco
+  automático. Se manejan como en el Explorador: selección simple y múltiple
+  (Ctrl, Mayús, Ctrl+A), doble clic para abrir, `F2` renombrar, `Supr`
+  eliminar, `Ctrl+C`/`X`/`V`, `F5` actualizar y el menú contextual del shell
+  («Más opciones de Windows»). Las carpetas se vigilan con
+  `ReadDirectoryChangesW`, así que lo que se cree o se borre se ve al momento.
 - **Atajos globales**: `Win+E` explorador, `Win+R` ejecutar, `Win+I`
   configuración, `Win+D` mostrar el escritorio, `Win+N` centro de
   notificaciones, `Win+L` bloquear, `Ctrl+Mayús+Esc` administrador de tareas y
@@ -147,6 +157,16 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 - **Administrador de tareas**: marco propio (barra de título, min/max/cerrar), pestañas,
   tabla de procesos con %CPU por delta y colores por umbral, filtrado, fin de proceso y
   pestaña Inicio (habilitar/deshabilitar con las claves StartupApproved de Windows).
+  El PID 0 («Proceso inactivo del sistema») no se lista: no es un proceso, sino
+  la cuenta del tiempo que la CPU pasa sin trabajo, y por eso saldría siempre
+  al 99 %. Su valor se enseña como *Inactivo* en los datos de la CPU, que es lo
+  que significa de verdad.
+  - *Liberar RAM*: botón en la pestaña Procesos que recorta el conjunto de
+    trabajo de todos los procesos accesibles (`EmptyWorkingSet`) y, con
+    elevación, vacía además las listas de memoria en espera y modificada del
+    sistema (`NtSetSystemInformation`). Dice cuánto se ha liberado, y el menú
+    contextual de cada proceso tiene la misma opción solo para ese proceso.
+    No cierra nada: las páginas que vuelvan a hacer falta se vuelven a paginar.
 - **Rendimiento** (`--taskmgr rendimiento`): una tarjeta con mini gráfica por
   dispositivo y, a la derecha, la gráfica grande y los datos del seleccionado.
   - *CPU*: uso total y por núcleo (`NtQuerySystemInformation` clase 8), nombre y
@@ -193,6 +213,9 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
     (Ctrl+C/X/V), eliminar (Supr, o Mayús+Supr para saltarse la papelera),
     cambiar nombre en la propia fila (F2) y carpeta nueva (Ctrl+N). Pegar en la
     carpeta de origen duplica con « - copia», como Windows.
+  - El ajuste *Confirmar al eliminar* pregunta antes de borrar (diciendo qué se
+    va a eliminar y si va a la papelera o para siempre), tanto en el explorador
+    como en el escritorio.
   - *Portapapeles* en formato CF_HDROP: lo copiado aquí se pega en el
     Explorador de Windows y al revés.
   - *Arrastrar y soltar* archivos sobre la ventana (sobre una carpeta los mete
@@ -220,8 +243,8 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 - Explorador: arrastrar archivos *hacia fuera* de la ventana (hace falta
   implementar `IDataObject` y `IDropSource`; soltar dentro ya funciona), vista
   de iconos grandes y árbol de carpetas en el panel lateral.
-- Escritorio: iconos del escritorio (requiere la vista del shell o una lista
-  propia sobre `%USERPROFILE%\Desktop`).
+- Escritorio: colocar los iconos a mano (ahora se ordenan solos en cuadrícula)
+  y selección con recuadro arrastrando.
 - Barra de tareas: agrupar varias ventanas de un mismo programa en un botón y
   listas de accesos rápidos (Jump Lists).
 - Administrador de tareas: columna de E/S real por proceso (ahora es 0) y

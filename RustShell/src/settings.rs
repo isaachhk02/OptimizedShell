@@ -212,6 +212,28 @@ static PANTALLA: &[Group] = &[
         Row::S(Id::EscritorioActivo),
         Row::S(Id::HotkeysActivas),
     ]},
+    Group { title: "Iconos del escritorio", rows: &[
+        Row::S(Id::EscritorioIconos),
+        Row::S(Id::EscritorioEquipo),
+        Row::S(Id::EscritorioUsuario),
+        Row::S(Id::EscritorioPapelera),
+        Row::S(Id::EscritorioRed),
+        Row::S(Id::EscritorioPanel),
+    ]},
+    Group { title: "Archivos del escritorio", rows: &[
+        Row::S(Id::EscritorioArchivos),
+        Row::S(Id::EscritorioPublico),
+        Row::S(Id::EscritorioOcultos),
+        Row::S(Id::EscritorioAutoRefresco),
+        Row::Link { glyph: "\u{EC50}", title: "Abrir la carpeta Escritorio",
+                    sub: "Lo que se ve en el escritorio, como carpeta",
+                    act: Act::Own("--explorer-escritorio") },
+    ]},
+    Group { title: "Aspecto de los iconos", rows: &[
+        Row::S(Id::EscritorioTamanoIcono),
+        Row::S(Id::EscritorioEtiquetas),
+        Row::S(Id::EscritorioOrden),
+    ]},
     Group { title: "Ajustes de Windows", rows: &[
         Row::Link { glyph: "\u{E7F8}", title: "Opciones avanzadas de pantalla",
                     sub: "HDR, escala de Windows y varios monitores",
@@ -1744,6 +1766,12 @@ fn click(st: &mut State, x: i32, y: i32) {
             match act {
                 Act::Url(u) => open_with_shell(u),
                 Act::Own("--abrir-ini") => open_ini(),
+                Act::Own("--explorer-escritorio") => {
+                    // La carpeta Escritorio del usuario, en el explorador propio.
+                    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
+                    crate::shell::launch_own(&format!("--explorer {}\\Desktop",
+                                                      home.trim_end_matches('\\')));
+                }
                 Act::Own(a) => crate::shell::launch_own(a),
             }
         }

@@ -753,6 +753,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             apply_placement(st, false);
             register_hotkeys(hwnd);
             ui::apply_perf();
+            // Si el escritorio estaba desactivado y se acaba de activar, hay
+            // que crearlo: la ventana no existía. (Al desactivarlo se esconde
+            // sola al recibir este mismo mensaje.)
+            if st.desktop.is_null() && config::current().b(config::Id::EscritorioActivo) {
+                st.desktop = crate::desktop::create(ui::hinst());
+            }
             InvalidateRect(hwnd, std::ptr::null(), 0);
             InvalidateRect(st.menu, std::ptr::null(), 0);
         }

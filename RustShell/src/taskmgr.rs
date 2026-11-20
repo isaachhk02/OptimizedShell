@@ -106,6 +106,7 @@ const B_PERF0: i32 = 200; // + índice de la tarjeta de dispositivo (Rendimiento
 const B_SVC_START: i32 = 23;
 const B_SVC_STOP: i32 = 24;
 const B_SVC_RESTART: i32 = 25;
+const B_FREERAM: i32 = 26; // Liberar RAM (Procesos)
 
 const STARTUP_COLS: [Col; 4] = [
     Col { title: "Nombre", width: 240, right: false },
@@ -200,6 +201,7 @@ struct State {
     btn_end: RECT,
     btn_newtask: RECT,
     btn_toggle: RECT,
+    btn_freeram: RECT,
     content: RECT,
     col_x: Vec<i32>,  // borde izquierdo de cada columna + fin
     // Inicio
@@ -211,6 +213,8 @@ struct State {
     svc_sel: isize,
     /// Último mensaje del SCM (error de permisos, servicio detenido...).
     svc_msg: Option<String>,
+    /// Resultado de «Liberar RAM», en la barra de la pestaña Procesos.
+    proc_msg: Option<String>,
     btn_svc_start: RECT,
     btn_svc_stop: RECT,
     btn_svc_restart: RECT,
@@ -219,6 +223,10 @@ struct State {
     mem_total: u64,
     mem_load: u32,
     cpu_total: f64,
+    /// Porcentaje que el kernel apunta al «Proceso inactivo del sistema»
+    /// (PID 0). No es un proceso: es el tiempo que la CPU pasa sin trabajo,
+    /// así que no se lista, se enseña como dato de la CPU.
+    cpu_idle: f64,
     // Rendimiento
     /// Muestreador abierto solo mientras la pestaña está a la vista.
     sampler: Option<perf::Sampler>,
@@ -276,13 +284,14 @@ fn snapshot(st: &mut State) {
     let mut new_prev: HashMap<u32, i64> = HashMap::new();
     let mut procs = Vec::with_capacity(st.procs.len().max(64));
     let mut total_cpu = 0.0f64;
+    let mut idle_cpu = 0.0f64;
 
     let mut offset = 0usize;
     loop {
         let p = unsafe { &*(buf.as_ptr().add(offset) as *const Spi) };
         let pid = p.unique_process_id as u32;
         let name = if p.image_name.buffer.is_null() || p.image_name.length == 0 {
-            if p.unique_process_id == 0 { "Proceso inactivo del sistema".to_string() } else { String::new() }
+            String::new()
         } else {
             let len = (p.image_name.length / 2) as usize;
             let slice = unsafe { std::slice::from_raw_parts(p.image_name.buffer, len) };
@@ -300,7 +309,16 @@ fn snapshot(st: &mut State) {
             }
         }
         new_prev.insert(pid, times);
-        procs.push(Proc { pid, name, ws: p.working_set_size as u64, threads: p.number_of_threads, cpu });
+        // El PID 0 («Proceso inactivo del sistema») no es un proceso: es la
+        // cuenta del tiempo que cada núcleo pasa sin nada que hacer, y por eso
+        // sale casi siempre al 99 %. El Administrador de tareas de Windows no
+        // lo lista; aquí tampoco: su valor se enseña como «Inactivo» en la
+        // pestaña Rendimiento, que es lo que de verdad significa.
+        if pid == 0 {
+            idle_cpu = cpu as f64;
+        } else {
+            procs.push(Proc { pid, name, ws: p.working_set_size as u64, threads: p.number_of_threads, cpu });
+        }
         if p.next_entry_offset == 0 {
             break;
         }
@@ -311,6 +329,7 @@ fn snapshot(st: &mut State) {
     st.prev_cpu = new_prev;
     st.prev_tick = now;
     st.cpu_total = total_cpu.min(100.0);
+    st.cpu_idle = idle_cpu.clamp(0.0, 100.0);
 
     // memoria
     unsafe {
@@ -386,6 +405,7 @@ fn sample_perf(st: &mut State) {
             axis: "100 %".into(),
             detail: vec![
                 ("Uso".into(), format!("{:.1} %", snap.cpu_total)),
+                ("Inactivo".into(), format!("{:.1} %", st.cpu_idle)),
                 ("Núcleos lógicos".into(), info.logical.to_string()),
                 ("Núcleos físicos".into(), info.physical.to_string()),
                 ("Velocidad base".into(), if info.mhz > 0 { format!("{:.2} GHz", info.mhz as f64 / 1000.0) } else { "—".into() }),
@@ -587,6 +607,7 @@ fn layout(st: &mut State) {
     st.btn_end = empty_rect();
     st.btn_newtask = empty_rect();
     st.btn_toggle = empty_rect();
+    st.btn_freeram = empty_rect();
     let mut rx = w - ui::s(14);
     let right = |width: i32, rx: &mut i32| -> RECT {
         *rx -= width;
@@ -598,6 +619,7 @@ fn layout(st: &mut State) {
         Tab::Proc => {
             st.btn_end = right(ui::s(132), &mut rx);
             st.btn_newtask = right(ui::s(124), &mut rx);
+            st.btn_freeram = right(ui::s(118), &mut rx);
         }
         Tab::Startup => {
             st.btn_toggle = right(ui::s(150), &mut rx);
@@ -731,6 +753,15 @@ fn paint(st: &State) {
             Tab::Proc => {
                 draw_button(g, &s, st.btn_end, "Finalizar tarea", st.hover_btn == B_END, false, true);
                 draw_button(g, &s, st.btn_newtask, "Nueva tarea", st.hover_btn == B_NEWTASK, true, false);
+                draw_button(g, &s, st.btn_freeram, "Liberar RAM", st.hover_btn == B_FREERAM,
+                            false, false);
+                // Resultado de la última liberación (o el aviso de elevación).
+                if let Some(m) = &st.proc_msg {
+                    g.text_in(m, (st.search_rc.right + ui::s(14)) as f32, st.search_rc.top as f32,
+                              (st.btn_freeram.left - st.search_rc.right - ui::s(28)) as f32,
+                              (st.search_rc.bottom - st.search_rc.top) as f32, 11.0, false,
+                              s.text_dim, Align::Near, Align::Center, false);
+                }
             }
             Tab::Startup => {
                 let label = match st.startup_items.get(st.startup_sel.max(0) as usize) {
@@ -1423,6 +1454,110 @@ fn open_process_location(pid: u32) {
     }
 }
 
+// ---------------------------------------------------------------- liberar RAM
+// «Liberar RAM» hace dos cosas, de menos a más invasivo:
+//
+//   1. Recorta el conjunto de trabajo de cada proceso al que se puede abrir un
+//      handle (`EmptyWorkingSet`): Windows devuelve a la lista de disponibles
+//      las páginas que ese proceso no está usando ahora mismo. No mata nada ni
+//      pierde datos: lo que haga falta otra vez se vuelve a paginar.
+//   2. Si hay elevación, vacía además las listas de memoria en espera y
+//      modificada del sistema (`NtSetSystemInformation`), que es lo que de
+//      verdad baja el «en uso» cuando la caché se ha comido la RAM.
+//
+// Sin elevación solo se hace el paso 1 y se dice por qué.
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtSetSystemInformation(class: u32, info: *mut c_void, len: u32) -> i32;
+}
+
+/// SystemMemoryListInformation.
+const SYSTEM_MEMORY_LIST_CLASS: u32 = 80;
+/// Órdenes de SYSTEM_MEMORY_LIST_COMMAND.
+const MEMORY_FLUSH_MODIFIED_LIST: u32 = 3;
+const MEMORY_PURGE_STANDBY_LIST: u32 = 4;
+
+/// Memoria física en uso ahora mismo, en bytes.
+fn physical_in_use() -> u64 {
+    unsafe {
+        let mut m: MEMORYSTATUSEX = std::mem::zeroed();
+        m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if GlobalMemoryStatusEx(&mut m) == 0 {
+            return 0;
+        }
+        m.ullTotalPhys - m.ullAvailPhys
+    }
+}
+
+/// Recorta el conjunto de trabajo de un proceso. Devuelve true si se pudo.
+fn trim_process(pid: u32) -> bool {
+    use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+    };
+    if pid == 0 || pid == 4 {
+        // El proceso inactivo y el System no se tocan.
+        return false;
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = EmptyWorkingSet(h) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+/// Vacía las listas de memoria en espera y modificada. Necesita elevación
+/// (SeProfileSingleProcessPrivilege); devuelve false si Windows la rechaza.
+fn purge_system_lists() -> bool {
+    unsafe {
+        let mut cmd: u32 = MEMORY_FLUSH_MODIFIED_LIST;
+        let flushed = NtSetSystemInformation(SYSTEM_MEMORY_LIST_CLASS,
+                                             &mut cmd as *mut _ as *mut c_void, 4) >= 0;
+        let mut cmd: u32 = MEMORY_PURGE_STANDBY_LIST;
+        let purged = NtSetSystemInformation(SYSTEM_MEMORY_LIST_CLASS,
+                                            &mut cmd as *mut _ as *mut c_void, 4) >= 0;
+        flushed || purged
+    }
+}
+
+/// Libera memoria y deja el resultado en la barra de herramientas.
+fn free_ram(st: &mut State) {
+    let before = physical_in_use();
+    let pids: Vec<u32> = st.procs.iter().map(|p| p.pid).collect();
+    let mut trimmed = 0usize;
+    for pid in pids {
+        if trim_process(pid) {
+            trimmed += 1;
+        }
+    }
+    // El propio administrador de tareas también.
+    ui::trim_working_set();
+    let lists = if services::is_elevated() { purge_system_lists() } else { false };
+
+    // Windows tarda un instante en devolver las páginas a la lista de libres.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let after = physical_in_use();
+    let freed = before.saturating_sub(after);
+
+    let detalle = if lists {
+        "listas del sistema incluidas"
+    } else if services::is_elevated() {
+        "sin tocar las listas del sistema"
+    } else {
+        "como administrador se libera más"
+    };
+    st.proc_msg = Some(if freed > 0 {
+        format!("Liberados {} ({} procesos, {}).", format_bytes(freed), trimmed, detalle)
+    } else {
+        format!("Nada que liberar ({} procesos, {}).", trimmed, detalle)
+    });
+    snapshot(st);
+}
+
 /// Menú contextual de un proceso: finalizar, ubicación, prioridad, eficiencia
 /// y afinidad.
 fn process_menu(st: &mut State, screen_x: i32, screen_y: i32) {
@@ -1459,6 +1594,11 @@ fn process_menu(st: &mut State, screen_x: i32, screen_y: i32) {
             .glyph("\u{E945}")
             .checked(eco),
     );
+    items.push(
+        menu::Item::new(21, "Liberar la memoria de este proceso")
+            .glyph("\u{EA3A}")
+            .hint("EmptyWorkingSet"),
+    );
     items.push(menu::Item::new(30, "Afinidad de procesadores...").glyph("\u{E950}"));
 
     match menu::popup(st.hwnd, screen_x, screen_y, items) {
@@ -1472,6 +1612,20 @@ fn process_menu(st: &mut State, screen_x: i32, screen_y: i32) {
         }
         20 => {
             set_process_eco(pid, !eco);
+        }
+        21 => {
+            let before = physical_in_use();
+            let ok = trim_process(pid);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let freed = before.saturating_sub(physical_in_use());
+            st.proc_msg = Some(if !ok {
+                format!("No se pudo abrir el proceso {} (puede que haga falta elevación).", pid)
+            } else if freed > 0 {
+                format!("{}: liberados {}.", name, format_bytes(freed))
+            } else {
+                format!("{}: nada que liberar ahora mismo.", name)
+            });
+            snapshot(st);
         }
         30 => affinity_menu(st, screen_x, screen_y, pid),
         _ => {}
@@ -1620,6 +1774,9 @@ fn hit_test_btn(st: &State, x: i32, y: i32) -> i32 {
             if in_rect(&st.btn_newtask, x, y) {
                 return B_NEWTASK;
             }
+            if in_rect(&st.btn_freeram, x, y) {
+                return B_FREERAM;
+            }
         }
         Tab::Startup => {
             if in_rect(&st.btn_toggle, x, y) {
@@ -1714,6 +1871,7 @@ fn switch_tab(st: &mut State, t: Tab) {
     st.tab = t;
     st.filter.clear();
     st.scroll = 0;
+    st.proc_msg = None;
     if t == Tab::Startup {
         load_startup(st);
     }
@@ -1857,6 +2015,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     B_MAX => { ShowWindow(hwnd, if IsZoomed(hwnd) != 0 { SW_RESTORE } else { SW_MAXIMIZE }); return 0; }
                     B_END => { end_selected(st); return 0; }
                     B_NEWTASK => { new_task(); return 0; }
+                    B_FREERAM => { free_ram(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
                     B_TOGGLE => { toggle_startup(st); InvalidateRect(hwnd, std::ptr::null(), 0); return 0; }
                     B_SVC_START | B_SVC_STOP | B_SVC_RESTART => {
                         service_action(st, btn);
@@ -2088,6 +2247,7 @@ pub fn run() -> i32 {
             btn_end: empty_rect(),
             btn_newtask: empty_rect(),
             btn_toggle: empty_rect(),
+            btn_freeram: empty_rect(),
             content: empty_rect(),
             col_x: Vec::new(),
             startup_items: Vec::new(),
@@ -2096,6 +2256,7 @@ pub fn run() -> i32 {
             svc_view: Vec::new(),
             svc_sel: -1,
             svc_msg: None,
+            proc_msg: None,
             btn_svc_start: empty_rect(),
             btn_svc_stop: empty_rect(),
             btn_svc_restart: empty_rect(),
@@ -2103,6 +2264,7 @@ pub fn run() -> i32 {
             mem_total: 0,
             mem_load: 0,
             cpu_total: 0.0,
+            cpu_idle: 0.0,
             sampler: None,
             perf_devs: Vec::new(),
             perf_sel: 0,
@@ -2141,3 +2303,24 @@ pub fn run() -> i32 {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Liberar la memoria del propio proceso tiene que funcionar siempre (es
+    /// el caso en el que no hace falta ningún permiso extra), y la lectura de
+    /// memoria física en uso tiene que dar algo creíble.
+    #[test]
+    fn liberar_memoria_del_proceso_actual() {
+        let antes = physical_in_use();
+        assert!(antes > 0, "no se pudo leer la memoria en uso");
+        let pid = unsafe {
+            windows_sys::Win32::System::Threading::GetCurrentProcessId()
+        };
+        assert!(trim_process(pid), "EmptyWorkingSet falló sobre el propio proceso");
+        // El proceso inactivo y System no se tocan nunca.
+        assert!(!trim_process(0));
+        assert!(!trim_process(4));
+    }
+}

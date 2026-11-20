@@ -107,9 +107,23 @@ pub enum Id {
     EscritorioColor,
     HotkeysActivas,
     BandejaIconosApps,
+    // Iconos del escritorio
+    EscritorioIconos,
+    EscritorioTamanoIcono,
+    EscritorioEtiquetas,
+    EscritorioEquipo,
+    EscritorioPapelera,
+    EscritorioUsuario,
+    EscritorioRed,
+    EscritorioPanel,
+    EscritorioArchivos,
+    EscritorioPublico,
+    EscritorioOrden,
+    EscritorioOcultos,
+    EscritorioAutoRefresco,
 }
 
-pub const COUNT: usize = Id::BandejaIconosApps as usize + 1;
+pub const COUNT: usize = Id::EscritorioAutoRefresco as usize + 1;
 
 /// Página de la ventana de Configuración a la que pertenece cada ajuste.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -168,6 +182,7 @@ const ALINEACIONES: &[&str] = &["Izquierda", "Centro"];
 const ICONOS_INICIO: &[&str] = &["Glifo", "shell32.dll", "imageres.dll", "Dibujado"];
 const ESQUINAS_NOTIF: &[&str] = &["Derecha", "Izquierda", "Centro"];
 const AJUSTES_FONDO: &[&str] = &["Rellenar", "Ajustar", "Expandir", "Mosaico", "Centrar"];
+const ORDEN_ICONOS: &[&str] = &["Nombre", "Tipo", "Fecha", "Tamaño"];
 
 const APARIENCIA: &str = "Apariencia";
 const BARRA: &str = "BarraDeTareas";
@@ -432,6 +447,47 @@ pub static ITEMS: &[Item] = &[
     Item { id: Id::BandejaIconosApps, page: Page::Bandeja, section: BANDEJA, key: "IconosApps",
         label: "Iconos de las aplicaciones",
         help: "Los que publican con Shell_NotifyIcon. Solo llegan si OptimizedShell es el shell.",
+        kind: Kind::Bool, def: 1 },
+    // ------------------------------------------- iconos del escritorio
+    Item { id: Id::EscritorioIconos, page: Page::Escritorio, section: ESCRITORIO, key: "Iconos",
+        label: "Mostrar los iconos del escritorio",
+        help: "Al desactivarlo el escritorio queda limpio: solo el fondo.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioTamanoIcono, page: Page::Escritorio, section: ESCRITORIO, key: "TamanoIcono",
+        label: "Tamaño de los iconos", help: "Lado del icono, sin contar el rótulo.",
+        kind: Kind::Int { min: 32, max: 96, step: 8, unit: "px" }, def: 48 },
+    Item { id: Id::EscritorioEtiquetas, page: Page::Escritorio, section: ESCRITORIO, key: "Etiquetas",
+        label: "Mostrar los nombres", help: "Sin rótulos los iconos ocupan bastante menos.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioEquipo, page: Page::Escritorio, section: ESCRITORIO, key: "IconoEquipo",
+        label: "Este equipo", help: "Unidades y carpetas del equipo.", kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioPapelera, page: Page::Escritorio, section: ESCRITORIO, key: "IconoPapelera",
+        label: "Papelera de reciclaje", help: "El icono cambia según esté vacía o no.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioUsuario, page: Page::Escritorio, section: ESCRITORIO, key: "IconoUsuario",
+        label: "Carpeta del usuario", help: "La carpeta personal (%USERPROFILE%).",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioRed, page: Page::Escritorio, section: ESCRITORIO, key: "IconoRed",
+        label: "Red", help: "Equipos y recursos compartidos de la red.", kind: Kind::Bool, def: 0 },
+    Item { id: Id::EscritorioPanel, page: Page::Escritorio, section: ESCRITORIO, key: "IconoPanel",
+        label: "Panel de control", help: "", kind: Kind::Bool, def: 0 },
+    Item { id: Id::EscritorioArchivos, page: Page::Escritorio, section: ESCRITORIO, key: "Archivos",
+        label: "Archivos y accesos directos del escritorio",
+        help: "Lo que haya dentro de la carpeta Escritorio del usuario.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioPublico, page: Page::Escritorio, section: ESCRITORIO, key: "ArchivosPublicos",
+        label: "Incluir el escritorio público",
+        help: "La carpeta Escritorio común a todos los usuarios.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::EscritorioOrden, page: Page::Escritorio, section: ESCRITORIO, key: "Orden",
+        label: "Ordenar los iconos por",
+        help: "Los iconos del sistema van primero y las carpetas antes que los archivos.",
+        kind: Kind::Choice(ORDEN_ICONOS), def: 0 },
+    Item { id: Id::EscritorioOcultos, page: Page::Escritorio, section: ESCRITORIO, key: "Ocultos",
+        label: "Mostrar los archivos ocultos", help: "", kind: Kind::Bool, def: 0 },
+    Item { id: Id::EscritorioAutoRefresco, page: Page::Escritorio, section: ESCRITORIO, key: "AutoRefresco",
+        label: "Actualizar los iconos solos",
+        help: "Vigila las carpetas Escritorio y relee cuando algo cambia.",
         kind: Kind::Bool, def: 1 },
 ];
 

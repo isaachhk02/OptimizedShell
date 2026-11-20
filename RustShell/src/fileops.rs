@@ -251,6 +251,47 @@ pub fn free_copy_name(dir: &str, name: &str) -> String {
     first
 }
 
+/// Pregunta antes de eliminar, si el ajuste «Confirmar al eliminar» está
+/// activo. Devuelve true cuando se puede seguir.
+///
+/// El shell ya avisa al borrar para siempre, pero no al mandar a la Papelera
+/// (eso depende de los ajustes de Windows): así el interruptor de
+/// OptimizedShell manda en los dos casos y dice exactamente qué se va a
+/// eliminar.
+pub fn confirm_delete(owner: HWND, paths: &[String], permanent: bool) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO,
+    };
+    if paths.is_empty() {
+        return false;
+    }
+    if !crate::ui::config::current().b(crate::ui::config::Id::ExplConfirmarBorrado) {
+        return true;
+    }
+    let what = if paths.len() == 1 {
+        let name = std::path::Path::new(&paths[0])
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| paths[0].clone());
+        format!("«{}»", name)
+    } else {
+        format!("{} elementos", paths.len())
+    };
+    let msg = if permanent {
+        format!("¿Eliminar {} para siempre?\n\nNo se podrá recuperar desde la Papelera.", what)
+    } else {
+        format!("¿Mover {} a la Papelera de reciclaje?", what)
+    };
+    unsafe {
+        MessageBoxW(
+            owner,
+            wide(&msg).as_ptr(),
+            wide("Eliminar").as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        ) == IDYES
+    }
+}
+
 /// Elimina archivos: a la papelera o para siempre.
 pub fn delete(owner: HWND, paths: &[String], permanent: bool) -> OpResult {
     if paths.is_empty() {

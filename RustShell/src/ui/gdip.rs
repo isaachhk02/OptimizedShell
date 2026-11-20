@@ -372,6 +372,30 @@ impl Gfx {
         }
     }
 
+
+    /// Ancho en píxeles que ocuparía el texto (para recortar rótulos).
+    pub fn text_width(&self, s: &str, size_pt: f32, bold: bool) -> f32 {
+        if s.is_empty() {
+            return 0.0;
+        }
+        let utf16 = wide(s);
+        let layout = RectF { X: 0.0, Y: 0.0, Width: 100000.0, Height: 10000.0 };
+        let mut bounds = RectF { X: 0.0, Y: 0.0, Width: 0.0, Height: 0.0 };
+        unsafe {
+            GdipMeasureString(
+                self.g,
+                utf16.as_ptr(),
+                (utf16.len() - 1) as i32,
+                font(size_pt, bold, false),
+                &layout,
+                format(Align::Near, Align::Near),
+                &mut bounds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+        bounds.Width
+    }
     /// Texto alineado a la izquierda, centrado verticalmente (lo más común).
     pub fn text(&self, s: &str, x: i32, y: i32, w: i32, h: i32, size_pt: f32, bold: bool, c: Color) {
         self.text_in(s, x as f32, y as f32, w as f32, h as f32, size_pt, bold, c,

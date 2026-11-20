@@ -109,6 +109,12 @@ jobs:
 
           Incluye también la pestaña **Rendimiento** del administrador (CPU total y por núcleo, memoria, GPUs con nombre y VRAM, y temperatura de las zonas térmicas ACPI) y el **menú Inicio estilo Windows 7**: programas más usados, «Todos los programas», búsqueda en vivo y columna derecha con carpetas, Equipo, Panel de control y apagado.
 
+          **Iconos del escritorio** (nuevo en 0.5.0): los esenciales (Este equipo, carpeta del usuario, Papelera de reciclaje con su icono de vacía o llena, Red y Panel de control) y todo lo que haya en las carpetas `Escritorio` del usuario y la pública, con el icono real del shell en tamaño grande. Se manejan como en el Explorador: selección simple y múltiple, doble clic para abrir, `F2` renombrar, `Supr` eliminar, `Ctrl+C`/`X`/`V`, `F5` y el menú contextual del shell. Cada icono esencial tiene su interruptor, y hay ajustes de tamaño, rótulos, orden, archivos ocultos y refresco automático (`ReadDirectoryChangesW`).
+
+          **Liberar RAM** (nuevo en 0.5.0): botón en la pestaña Procesos que recorta el conjunto de trabajo de todos los procesos accesibles y, con elevación, vacía también las listas de memoria en espera y modificada del sistema, diciendo cuánto se ha liberado. El menú de cada proceso tiene la misma opción solo para ese proceso.
+
+          El **«Proceso inactivo del sistema»** (PID 0) ya no se lista entre los procesos: no es un proceso, sino la cuenta del tiempo que la CPU pasa sin trabajo, y por eso salía al 99 %. Su valor se enseña como *Inactivo* en los datos de la CPU. Y el ajuste **Confirmar al eliminar** ya pregunta de verdad antes de borrar, en el explorador y en el escritorio.
+
           Los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini` y se aplican en caliente.
 
           SHA-256 de `OptimizedShell.exe`:
