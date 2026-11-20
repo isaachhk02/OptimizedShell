@@ -1,6 +1,6 @@
 [package]
 name = "optimized-shell"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "OptimizedShell: shell ligero para Windows (port a Rust, mínimo consumo)"
 build = "build.rs"

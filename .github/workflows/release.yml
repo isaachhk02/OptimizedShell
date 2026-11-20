@@ -115,6 +115,8 @@ jobs:
 
           El **«Proceso inactivo del sistema»** (PID 0) ya no se lista entre los procesos: no es un proceso, sino la cuenta del tiempo que la CPU pasa sin trabajo, y por eso salía al 99 %. Su valor se enseña como *Inactivo* en los datos de la CPU. Y el ajuste **Confirmar al eliminar** ya pregunta de verdad antes de borrar, en el explorador y en el escritorio.
 
+          **La Configuración original de Windows 11 ya se abre** (corregido en 0.5.1): los enlaces `ms-settings:` (Pantalla, Sonido, Red, Bluetooth, Impresoras, Energía, Aplicaciones, Accesibilidad...) no abrían nada, porque la activación de las aplicaciones empaquetadas pasa por COM y los hilos de interfaz no lo inicializaban. Ahora se inicializa al abrir y, si la activación falla igualmente (caso típico cuando OptimizedShell es el shell y no hay un `explorer.exe` de sesión), se reintenta a través de `explorer.exe`. Afecta a la Configuración propia, al área de notificación y a los clics en volumen, red, Bluetooth y batería.
+
           Los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini` y se aplican en caliente.
 
           SHA-256 de `OptimizedShell.exe`:
