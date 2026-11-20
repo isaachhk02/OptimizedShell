@@ -57,15 +57,26 @@ jobs:
         id: pack
         shell: pwsh
         run: |
-          $exe = 'RustShell\target\x86_64-pc-windows-msvc\release\OptimizedShell.exe'
+          $out = 'RustShell\target\x86_64-pc-windows-msvc\release'
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item $exe dist\OptimizedShell.exe
+          New-Item -ItemType Directory -Force dist\installer | Out-Null
+          # Los cuatro ejecutables del entorno.
+          $exes = 'OptimizedShell.exe', 'OptimizedExplorer.exe', 'OptimizedTaskmgr.exe', 'OptimizedLogonUI.exe'
+          foreach ($e in $exes) { Copy-Item (Join-Path $out $e) (Join-Path 'dist' $e) }
           Copy-Item README.md dist\README.md
           Copy-Item LICENSE dist\LICENSE
+          Copy-Item installer\install.ps1 dist\installer\install.ps1
+          Copy-Item installer\uninstall.ps1 dist\installer\uninstall.ps1
+          # Un .sha256 por ejecutable (el de OptimizedShell.exe es el que
+          # comprueba --update) y uno con todos juntos.
+          foreach ($e in $exes) {
+            $h = (Get-FileHash (Join-Path 'dist' $e) -Algorithm SHA256).Hash
+            "$h  $e" | Out-File (Join-Path 'dist' "$e.sha256") -Encoding ascii
+            "$h  $e" | Out-File dist\SHA256SUMS.txt -Encoding ascii -Append
+          }
           $hash = (Get-FileHash dist\OptimizedShell.exe -Algorithm SHA256).Hash
-          $size = '{0:N0}' -f (Get-Item dist\OptimizedShell.exe).Length
-          "$hash  OptimizedShell.exe" | Out-File dist\OptimizedShell.exe.sha256 -Encoding ascii
-          Compress-Archive -Path dist\OptimizedShell.exe, dist\README.md, dist\LICENSE -DestinationPath "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip"
+          $size = '{0:N0}' -f ((Get-ChildItem (($exes | ForEach-Object { Join-Path 'dist' $_ })) | Measure-Object Length -Sum).Sum)
+          Compress-Archive -Path dist\OptimizedShell.exe, dist\OptimizedExplorer.exe, dist\OptimizedTaskmgr.exe, dist\OptimizedLogonUI.exe, dist\README.md, dist\LICENSE, dist\installer -DestinationPath "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip"
           "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -79,7 +90,18 @@ jobs:
           $notes = @'
           Shell y utilidades ligeras para Windows 10/11 en Rust sobre Win32 + GDI+.
 
-          **Un solo ejecutable** (`OptimizedShell.exe`, ${{ steps.pack.outputs.size }} bytes), sin dependencias ni VC++ redist:
+          **Cuatro ejecutables independientes** (${{ steps.pack.outputs.size }} bytes en total), sin dependencias ni VC++ redist:
+
+          | Ejecutable | Para qué |
+          |---|---|
+          | `OptimizedShell.exe` | barra de tareas, menú Inicio, escritorio y router de todos los modos |
+          | `OptimizedExplorer.exe` | explorador de archivos (`OptimizedExplorer.exe [ruta]`) |
+          | `OptimizedTaskmgr.exe` | administrador de tareas (`OptimizedTaskmgr.exe [pestaña]`) |
+          | `OptimizedLogonUI.exe` | pantalla de bloqueo e inicio de sesión (`--lock`, `--logon`, `--demo`) |
+
+          **Instalador**: `installer\install.ps1` (dentro del .zip) copia el entorno a `%ProgramFiles%\OptimizedShell`, crea los accesos del menú Inicio, registra las rutas de aplicación y la entrada de «Programas instalados», y con `-AsShell` deja OptimizedShell como shell del usuario. `installer\uninstall.ps1` lo deshace y devuelve el Explorador de Windows.
+
+          El binario principal sigue aceptando todos los modos de siempre:
 
           | Modo | Comando |
           |---|---|
@@ -125,6 +147,12 @@ jobs:
 
           **Iconos anclados en la barra de tareas** (nuevo en 0.7.0): los programas anclados se dibujan siempre entre el botón Inicio y los botones de ventana, con el icono real del shell. Pulsarlos abre el programa o, si ya está abierto, trae su ventana al frente (y la minimiza al volver a pulsar); un punto bajo el icono avisa de que está en ejecución y el subrayado de acento, de que es la ventana en primer plano. El botón derecho da «Abrir», «Ejecutar como administrador», «Abrir la ubicación», «Cerrar la ventana» y «Desanclar»; sobre un botón de ventana aparece además «Anclar a la barra de tareas». Se guardan por ruta y en orden en `%APPDATA%\OptimizedShell\taskbar.ini`, y en **Configuración › Barra de tareas › Iconos anclados** se pueden anclar con «Examinar...», reordenar y desanclar, además de esconderlos, mantener el icono con el programa abierto o cambiar su tamaño.
 
+          **Un ejecutable por herramienta** (nuevo en 0.8.0): el explorador de archivos, el administrador de tareas y la pantalla de bloqueo son ahora `OptimizedExplorer.exe`, `OptimizedTaskmgr.exe` y `OptimizedLogonUI.exe`. Todo el código vive en una biblioteca común (`optimized_shell`) y cada binario es un `main` mínimo, así que cada ventana es su propio proceso: solo ocupa memoria mientras está abierta y un fallo en el explorador no se lleva por delante la barra de tareas. La barra, el escritorio y los menús lanzan el ejecutable de cada herramienta cuando está instalado al lado, y `OptimizedShell.exe` sigue aceptando todos los flags de siempre (`--explorer`, `--taskmgr`, `--lock`...) para quien prefiera un binario único.
+
+          **Instalador** (nuevo en 0.8.0): `installer\install.ps1` se eleva solo, copia el entorno a `%ProgramFiles%\OptimizedShell` (apartando a `.old` lo que esté en uso), crea los accesos del menú Inicio, registra las rutas de aplicación —`OptimizedExplorer` se puede escribir en Ejecutar— y la entrada de «Programas instalados» con su desinstalador, y con `-AsShell` deja OptimizedShell como shell del usuario. `installer\uninstall.ps1` devuelve el Explorador de Windows, cierra el entorno y limpia accesos, claves y archivos, conservando los ajustes salvo que se pase `-BorrarAjustes`.
+
+          **Los iconos del escritorio abren el explorador propio** (nuevo en 0.8.0): el doble clic en una carpeta del escritorio (y «Este equipo», y la carpeta del usuario) abre `OptimizedExplorer`, no el Explorador de Windows. Los documentos y los accesos directos siguen yendo al shell, que es quien sabe con qué aplicación abrirlos, igual que la Papelera, Red y el Panel de control, que no son carpetas del disco. Las rutas con espacios ya se pasan entrecomilladas en todos los lanzamientos del explorador propio.
+
           **Licencia GPL-3.0-or-later**: el código se publica bajo la Licencia Pública General de GNU v3 o posterior (`LICENSE`), y el repositorio es público.
 
           Los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini` y se aplican en caliente.
@@ -137,5 +165,9 @@ jobs:
             "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip" `
             "dist\OptimizedShell.exe" `
             "dist\OptimizedShell.exe.sha256" `
+            "dist\OptimizedExplorer.exe" `
+            "dist\OptimizedTaskmgr.exe" `
+            "dist\OptimizedLogonUI.exe" `
+            "dist\SHA256SUMS.txt" `
             --title "OptimizedShell ${{ steps.tag.outputs.tag }}" `
             --notes-file notes.md

@@ -1,15 +1,34 @@
 [package]
 name = "optimized-shell"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
-description = "OptimizedShell: shell ligero para Windows (port a Rust, mínimo consumo)"
+description = "OptimizedShell: entorno ligero para Windows en Rust (barra de tareas, menú Inicio, escritorio, explorador, administrador de tareas, pantalla de bloqueo y configuración), en cuatro ejecutables independientes"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/isaachhk02/OptimizedShell"
 build = "build.rs"
 
+# Biblioteca compartida: todas las herramientas salen del mismo código.
+[lib]
+name = "optimized_shell"
+path = "src/lib.rs"
+
+# Barra de tareas y router de modos (sigue aceptando todos los flags).
 [[bin]]
 name = "OptimizedShell"
 path = "src/main.rs"
+
+# Cada herramienta, además, como ejecutable independiente.
+[[bin]]
+name = "OptimizedExplorer"
+path = "src/bin/explorer.rs"
+
+[[bin]]
+name = "OptimizedTaskmgr"
+path = "src/bin/taskmgr.rs"
+
+[[bin]]
+name = "OptimizedLogonUI"
+path = "src/bin/logonui.rs"
 
 [dependencies]
 windows-sys = { version = "0.60", features = [

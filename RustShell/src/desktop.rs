@@ -17,6 +17,11 @@
 // para eliminar, Ctrl+C/X/V, Ctrl+A y F5. Las carpetas se vigilan con
 // ReadDirectoryChangesW, así que crear o borrar un archivo se ve al momento.
 //
+// Las carpetas se abren en el explorador de OptimizedShell (`--explorer`), no
+// en el Explorador de Windows; los documentos y los accesos directos van al
+// shell, que es quien sabe con qué aplicación abrirlos, y lo mismo las
+// carpetas virtuales que no son del disco (Papelera, Red, Panel de control).
+//
 // La imagen sale de donde la deja Windows (HKCU\Control Panel\Desktop), así
 // que cambiarla desde la Configuración de Windows o desde la galería de
 // OptimizedShell se ve igual.
@@ -721,8 +726,46 @@ fn paint(hwnd: HWND, st: &mut State) {
 }
 
 // ============================================================ acciones
+/// Ruta que el explorador de OptimizedShell puede abrir, si el icono es una
+/// carpeta navegable. `None` para lo que no es del disco (Papelera, Red,
+/// Panel de control) y para los archivos, que necesitan su aplicación.
+fn own_explorer_path(it: &Icon) -> Option<String> {
+    if it.system {
+        return match it.target.as_str() {
+            // «Este equipo»: el explorador propio no tiene carpeta virtual de
+            // equipo, pero su panel lateral ya lista todas las unidades, así
+            // que se entra por la del sistema.
+            "shell:MyComputerFolder" => Some(format!(
+                "{}\\",
+                std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()).trim_end_matches('\\')
+            )),
+            // Papelera, Red y Panel de control no son carpetas del disco: de
+            // esas se sigue encargando el shell de Windows.
+            t if t.starts_with("shell:") => None,
+            // La carpeta del usuario sí es una ruta de verdad.
+            t => Some(t.to_string()),
+        };
+    }
+    if it.is_dir && !it.path.is_empty() {
+        return Some(it.path.clone());
+    }
+    None
+}
+
+/// Abre el explorador propio en una ruta (entre comillas: los nombres del
+/// escritorio llevan espacios muy a menudo).
+fn open_in_own_explorer(path: &str) {
+    crate::shell::launch_own(&format!("--explorer \"{}\"", path.trim_end_matches('\\')));
+}
+
+/// Doble clic (o «Abrir»): las carpetas van al explorador de OptimizedShell y
+/// el resto —documentos, accesos directos y las carpetas virtuales— al shell.
 fn open_icon(st: &mut State, i: usize) {
     let Some(it) = st.icons.get(i) else { return };
+    if let Some(path) = own_explorer_path(it) {
+        open_in_own_explorer(&path);
+        return;
+    }
     let target = it.target.clone();
     unsafe {
         ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
@@ -898,7 +941,7 @@ fn context_menu(st: &mut State, hwnd: HWND, x: i32, y: i32) {
             reload(st);
             repaint(hwnd);
         }
-        2 => crate::shell::launch_own(&format!("--explorer {}", user_profile())),
+        2 => open_in_own_explorer(&user_profile()),
         3 => crate::shell::launch_own("--taskmgr"),
         4 => unsafe {
             ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
@@ -997,7 +1040,7 @@ fn icon_menu(st: &mut State, hwnd: HWND, i: usize, x: i32, y: i32) {
         1 => open_icon(st, i),
         2 => {
             if let Some(dir) = std::path::Path::new(&it.path).parent() {
-                crate::shell::launch_own(&format!("--explorer {}", dir.to_string_lossy()));
+                open_in_own_explorer(&dir.to_string_lossy());
             }
         }
         3 => copy_selection(st, true),

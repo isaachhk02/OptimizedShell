@@ -146,7 +146,7 @@ fn run_act(act: Act) {
     match act {
         Act::Folder(sub) => {
             let base = std::env::var("USERPROFILE").unwrap_or_default();
-            crate::shell::launch_own(&format!("--explorer {}\\{}", base, sub));
+            crate::shell::launch_own(&format!("--explorer \"{}\\{}\"", base, sub));
         }
         Act::Own(args) => crate::shell::launch_own(args),
         Act::Control => unsafe {
@@ -506,7 +506,7 @@ fn app_menu(hwnd: HWND, m: &mut Menu, app: &apps::App, x: i32, y: i32) {
         4 => {
             if let Some(dir) = apps::parent_dir(&app.path) {
                 unsafe { ShowWindow(hwnd, SW_HIDE) };
-                crate::shell::launch_own(&format!("--explorer {}", dir));
+                crate::shell::launch_own(&format!("--explorer \"{}\"", dir));
             }
         }
         5 => {

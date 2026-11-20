@@ -1450,7 +1450,7 @@ fn open_process_location(pid: u32) {
         return;
     }
     if let Some(dir) = std::path::Path::new(&path).parent() {
-        crate::shell::launch_own(&format!("--explorer {}", dir.to_string_lossy()));
+        crate::shell::launch_own(&format!("--explorer \"{}\"", dir.to_string_lossy()));
     }
 }
 

@@ -736,7 +736,7 @@ fn list_menu(st: &mut State, x: i32, y: i32) {
         }
         2 => {
             if let Some(p) = paths.first() {
-                crate::shell::launch_own(&format!("--explorer {}", p));
+                crate::shell::launch_own(&format!("--explorer \"{}\"", p));
             }
         }
         3 => copy_selection(st, true),

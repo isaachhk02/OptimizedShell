@@ -5,7 +5,20 @@ Shell y utilidades ligeras para Windows 10/11 escritas en **Rust** sobre Win32 +
 sustituir a `explorer.exe` y a las herramientas del sistema por versiones que consuman
 mucha menos CPU y RAM.
 
-Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
+**Cuatro ejecutables independientes**, uno por herramienta, sacados del mismo código
+(biblioteca `optimized_shell` + un `main` de tres líneas cada uno). Cada ventana es su
+propio proceso: si el explorador se cuelga, la barra de tareas sigue viva.
+
+| Ejecutable | Para qué | Argumentos |
+|---|---|---|
+| `OptimizedShell.exe` | Barra de tareas, menú Inicio, escritorio y router de todos los modos | ver la tabla de abajo |
+| `OptimizedExplorer.exe` | Explorador de archivos | `[ruta]` |
+| `OptimizedTaskmgr.exe` | Administrador de tareas | `[procesos\|rendimiento\|inicio\|servicios]` |
+| `OptimizedLogonUI.exe` | Pantalla de bloqueo e inicio de sesión | `--lock` · `--logon` · `--demo` |
+
+Cuando los cuatro están instalados juntos, la barra, el escritorio y los menús lanzan
+el ejecutable de cada herramienta; si solo hay `OptimizedShell.exe`, él sigue sabiendo
+hacerlo todo con los flags de siempre:
 
 | Modo | Comando | Qué hace |
 |---|---|---|
@@ -13,7 +26,7 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
 | Administrador de tareas | `--taskmgr [rendimiento\|inicio\|servicios]` | Procesos (con icono, prioridad, afinidad y EcoQoS), Rendimiento (CPU, GPU, RAM, temperatura), Inicio y Servicios |
 | Explorador de archivos | `--explorer [ruta]` | Navegación, panel lateral, columnas ordenables, operaciones de archivo, portapapeles y actualización automática |
 | Bloqueo / inicio de sesión | `--lock` · `--logon [--demo]` | Pantalla de bloqueo propia con autenticación |
-| Configuración | `--settings [inicio\|sistema\|bluetooth\|red\|personalizacion\|barra\|menu\|aplicaciones\|accesibilidad\|acerca]` | Configuración del sistema al estilo de Windows 11: buscador, categorías, información del equipo y accesos a las páginas de Windows |
+| Configuración | `--settings [inicio\|sistema\|pantalla\|bluetooth\|sonido\|red\|personalizacion\|barra\|menu\|aplicaciones\|accesibilidad\|acerca]` | Configuración del sistema al estilo de Windows 11: buscador, categorías, información del equipo y los ajustes de Windows nativos (energía, audio, Bluetooth, impresoras, ratón, teclado, red, programas, predeterminadas, accesibilidad y pantalla de bloqueo), sin `ms-settings:` |
 | Notificación | `--notify "Título\|Mensaje" [--ok\|--aviso\|--error] [--app <nombre>]` | Manda un aviso a la barra de tareas en ejecución (para scripts y tareas programadas) |
 | Instalación | `--install` · `--uninstall` | Usa OptimizedShell como shell del usuario actual, o vuelve a Explorer |
 | Actualización | `--update [--silent\|--forzar]` | Busca la última release en GitHub, comprueba su SHA-256 y sustituye el ejecutable |
@@ -142,6 +155,10 @@ dibuja recorriendo esa tabla, así que **añadir un ajuste es añadir una fila**
 
 - **`windows-sys`** (FFI cruda) en lugar del crate `windows`: menos código generado y
   binario más pequeño.
+- **Una herramienta, un proceso**: el código vive en una biblioteca común y cada
+  ejecutable es un `main` mínimo, así que el explorador o el administrador solo ocupan
+  memoria mientras están abiertos y un fallo en uno no se lleva por delante la barra de
+  tareas. Los cuatro juntos pesan menos de 2 MB.
 - **Perfil release agresivo**: `opt-level = "z"`, LTO, `codegen-units = 1`,
   `panic = "abort"`, símbolos quitados y CRT estática (`+crt-static`, sin VC++ redist).
 - **Sin sondeos agresivos**: la barra de tareas y el administrador se refrescan por
@@ -181,6 +198,37 @@ puede dejar un token de solo lectura en una línea en
 `%APPDATA%\OptimizedShell\github.token` o en la variable de entorno
 `OPTIMIZEDSHELL_TOKEN`.
 
+## Instalación
+
+En la [última release](https://github.com/isaachhk02/OptimizedShell/releases) hay un
+`.zip` con los cuatro ejecutables y la carpeta `installer`. El instalador es un script
+de PowerShell que se eleva solo:
+
+```powershell
+cd installer
+.\install.ps1                  # instala el entorno en %ProgramFiles%\OptimizedShell
+.\install.ps1 -AsShell         # ... y lo deja como shell del usuario (en vez de explorer.exe)
+.\install.ps1 -Dir "D:\OShell" # en otra carpeta
+.\uninstall.ps1                # lo deshace y devuelve el Explorador de Windows
+```
+
+Qué hace `install.ps1`:
+
+- copia los cuatro ejecutables (apartando a `.old` el que esté en uso), el `README.md`,
+  la `LICENSE` y el propio desinstalador a la carpeta de instalación;
+- crea los accesos del menú Inicio (barra de tareas, explorador, administrador de
+  tareas, Configuración, bloquear, buscar actualizaciones y desinstalar);
+- registra las **rutas de aplicación**, así que `OptimizedExplorer` o `OptimizedTaskmgr`
+  se pueden escribir directamente en Ejecutar (`Win+R`);
+- registra la entrada de **Programas instalados** (aparece en la página Aplicaciones de
+  la Configuración, con su desinstalador);
+- con `-AsShell`, escribe el valor `Shell` de Winlogon del usuario actual (lo mismo que
+  `OptimizedShell.exe --install`). Hay que cerrar sesión para que se aplique.
+
+`uninstall.ps1` devuelve el shell a `explorer.exe`, cierra los procesos del entorno y
+quita accesos, claves y archivos; los ajustes de `%APPDATA%\OptimizedShell` se conservan
+salvo que se pase `-BorrarAjustes`.
+
 ## Compilación
 
 Requiere la toolchain de Rust con el target `x86_64-pc-windows-msvc`:
@@ -190,12 +238,19 @@ cd RustShell
 .\build.ps1          # o: cargo build --release
 ```
 
-El binario queda en `RustShell\target\x86_64-pc-windows-msvc\release\OptimizedShell.exe`.
+Los cuatro binarios quedan en `RustShell\target\x86_64-pc-windows-msvc\release\`:
+`OptimizedShell.exe`, `OptimizedExplorer.exe`, `OptimizedTaskmgr.exe` y
+`OptimizedLogonUI.exe`. Para instalarlos sin pasar por la release:
+
+```powershell
+..\installer\install.ps1 -Source .\target\x86_64-pc-windows-msvc\release
+```
 
 ## Estado
 
-Port en curso desde la versión original en C++ (sustituida por esta implementación en
-Rust). Ya funcionan, con interfaz equivalente a la original:
+Port completado desde la versión original en C++ (sustituida por esta implementación en
+Rust) y repartido en cuatro ejecutables independientes con su instalador. Ya funcionan,
+con interfaz equivalente a la original:
 
 - **Administrador de tareas**: marco propio (barra de título, min/max/cerrar), pestañas,
   tabla de procesos con %CPU por delta y colores por umbral, filtrado, fin de proceso y

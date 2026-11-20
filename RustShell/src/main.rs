@@ -1,40 +1,21 @@
-// OptimizedShell (port a Rust). Un solo binario multi-modo seleccionado por flag,
-// igual que la versión C++. Sin consola.
+// OptimizedShell: barra de tareas (modo por defecto) y router de modos, igual
+// que la versión C++.
 //
 // Modos: (sin argumentos) shell | --taskmgr | --explorer [ruta] | --settings [seccion]
 //        --logon | --lock | --demo | --install | --uninstall
-//        --notify "Título|Mensaje" [--tipo info|ok|aviso|error]
+//        --notify "Título|Mensaje" [--ok|--aviso|--error]
 //        --update [--silent|--forzar]  (autoactualización desde GitHub)
+//
+// Las herramientas también son ejecutables propios —`OptimizedExplorer.exe`,
+// `OptimizedTaskmgr.exe` y `OptimizedLogonUI.exe`—; este router sigue
+// aceptando los flags de siempre y, si los binarios están instalados al lado,
+// `shell::launch_own` lanza el que toque en vez de otra copia de este.
 #![windows_subsystem = "windows"]
 
-mod args;
-mod ui;
-mod apps;
-mod perf;
-mod sysinfo;
-mod startup;
-mod taskmgr;
-mod settings;
-mod explorer;
-mod logon;
-mod shell;
-mod startmenu;
-mod tray;
-mod notify;
-mod services;
-mod desktop;
-mod radio;
-mod traynotify;
-mod display;
-mod fileops;
-mod watcher;
-mod update;
-mod winset;
-
-use args::has_arg;
+use optimized_shell::args::has_arg;
+use optimized_shell::{explorer, logon, send_notification, settings, shell, taskmgr, update};
 
 fn main() -> std::process::ExitCode {
-    // Router de modos (equivale a la cabecera de shell.cpp).
     let code = if has_arg("--logon") || has_arg("--lock") {
         logon::run(has_arg("--lock"), has_arg("--demo"))
     } else if has_arg("--taskmgr") {
@@ -54,29 +35,4 @@ fn main() -> std::process::ExitCode {
         shell::run()
     };
     std::process::ExitCode::from(code as u8)
-}
-
-/// `--notify "Título|Mensaje"`: manda un aviso a la barra de tareas que ya
-/// esté en ejecución. Sirve para que un script, una tarea programada o
-/// cualquier otra parte de OptimizedShell avise al usuario.
-fn send_notification() -> i32 {
-    let text = args::positional().unwrap_or_default();
-    let (title, body) = match text.split_once('|') {
-        Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
-        None => (text.trim().to_string(), String::new()),
-    };
-    if title.is_empty() && body.is_empty() {
-        return 2;
-    }
-    let kind = if has_arg("--error") {
-        notify::Kind::Error
-    } else if has_arg("--aviso") {
-        notify::Kind::Warning
-    } else if has_arg("--ok") {
-        notify::Kind::Success
-    } else {
-        notify::Kind::Info
-    };
-    let app = args::value("--app").unwrap_or_else(|| "OptimizedShell".to_string());
-    if notify::post(&app, &title, &body, kind) { 0 } else { 1 }
 }

@@ -784,7 +784,8 @@ fn raise(st: &State, mut note: notify::Note) {
 }
 
 // ------------------------------------------------------------ menú Inicio
-fn own_exe() -> String {
+/// Ruta completa de este ejecutable.
+pub fn own_exe() -> String {
     let mut buf = [0u16; 512];
     let n = unsafe {
         windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW(
@@ -793,10 +794,37 @@ fn own_exe() -> String {
     String::from_utf16_lossy(&buf[..n as usize])
 }
 
-/// Lanza otra instancia de OptimizedShell con los argumentos dados
-/// (`--settings`, `--explorer <ruta>`, `--taskmgr`, `--lock`...).
+/// Herramientas que tienen ejecutable propio, con el flag que las pedía
+/// cuando todo vivía en un solo binario.
+const TOOLS: &[(&str, &str)] = &[
+    ("--explorer", "OptimizedExplorer.exe"),
+    ("--taskmgr", "OptimizedTaskmgr.exe"),
+    ("--logon", "OptimizedLogonUI.exe"),
+    ("--lock", "OptimizedLogonUI.exe"),
+];
+
+/// Ejecutable que atiende estos argumentos: el de la herramienta si está
+/// instalado junto a este binario, y si no el propio (que sigue sabiendo
+/// hacerlo todo). Los argumentos no cambian: cada herramienta entiende su
+/// propio flag y se queda con el resto (la ruta, la pestaña, `--demo`...).
+fn exe_for(args: &str) -> String {
+    let first = args.split_whitespace().next().unwrap_or("");
+    if let Some((_, tool)) = TOOLS.iter().find(|(flag, _)| *flag == first) {
+        if let Some(dir) = std::path::Path::new(&own_exe()).parent() {
+            let cand = dir.join(tool);
+            if cand.is_file() {
+                return cand.to_string_lossy().to_string();
+            }
+        }
+    }
+    own_exe()
+}
+
+/// Lanza la herramienta que pidan estos argumentos (`--settings`,
+/// `--explorer <ruta>`, `--taskmgr`, `--lock`...): su propio ejecutable si
+/// está instalado, o otra instancia de OptimizedShell si no.
 pub fn launch_own(args: &str) {
-    let exe = own_exe();
+    let exe = exe_for(args);
     unsafe {
         ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide(&exe).as_ptr(),
                       ui::wide(args).as_ptr(), std::ptr::null(), SW_SHOWNORMAL);
@@ -834,7 +862,7 @@ fn pin_menu(st: &mut State, i: usize, sx: i32, sy: i32) {
         2 => crate::apps::launch_elevated(&path),
         3 => {
             if let Some(dir) = crate::apps::parent_dir(&path) {
-                launch_own(&format!("--explorer {}", dir));
+                launch_own(&format!("--explorer \"{}\"", dir));
             }
         }
         4 => {
@@ -945,7 +973,7 @@ fn unregister_hotkeys(hwnd: HWND) {
 fn run_hotkey(st: &mut State, id: i32) {
     match id {
         HK_EXPLORER => launch_own(&format!(
-            "--explorer {}",
+            "--explorer \"{}\"",
             std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into())
         )),
         HK_RUN => unsafe {

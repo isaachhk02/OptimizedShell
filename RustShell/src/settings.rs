@@ -1934,7 +1934,7 @@ fn click(st: &mut State, x: i32, y: i32) {
                 Act::Own("--explorer-escritorio") => {
                     // La carpeta Escritorio del usuario, en el explorador propio.
                     let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
-                    crate::shell::launch_own(&format!("--explorer {}\\Desktop",
+                    crate::shell::launch_own(&format!("--explorer \"{}\\Desktop\"",
                                                       home.trim_end_matches('\\')));
                 }
                 Act::Own(a) => crate::shell::launch_own(a),
