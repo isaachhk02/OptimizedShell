@@ -89,9 +89,17 @@ jobs:
           | Configuración | `--settings [pagina]` |
           | Instalar / desinstalar como shell | `--install` · `--uninstall` |
 
-          Incluye la pestaña **Rendimiento** del administrador (CPU total y por núcleo, memoria, GPUs con nombre y VRAM, y temperatura de las zonas térmicas ACPI) y un **menú Inicio estilo Windows 7**: programas más usados, «Todos los programas», búsqueda en vivo y columna derecha con carpetas, Equipo, Panel de control y apagado.
+          | Lanzar una notificación | `--notify "Título\|Mensaje"` |
 
-          La interfaz es configurable desde `--settings` (tema, barra de tareas, menú Inicio, listas y rendimiento); los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini`.
+          **Barra de tareas**: botón Inicio con el logotipo de Windows (`shell32.dll`), a la izquierda o centrado como en Windows 11; botones de ventana con el icono real de cada aplicación; y **área de notificación** con volumen, red (Wi-Fi con intensidad y SSID, o Ethernet), batería, Bluetooth y campana de avisos. Al pulsar cualquier icono se abre el panel de **Configuración rápida** (mosaicos de red, Bluetooth, No molestar y tema, deslizador de volumen y estado del equipo).
+
+          **Notificaciones**: avisos emergentes con cierre automático, centro de notificaciones con historial y No molestar, avisos propios de batería baja y de caída de la red, y `--notify` para que cualquier script avise al usuario.
+
+          **Configuración al estilo de Windows 11**: buscador que filtra todos los ajustes, página de inicio con la tarjeta del equipo y categorías (Sistema, Bluetooth y dispositivos, Red e Internet, Personalización, Barra de tareas, Menú Inicio, Aplicaciones, Accesibilidad y Acerca de), con información en vivo del equipo y accesos a las páginas de Windows.
+
+          Incluye también la pestaña **Rendimiento** del administrador (CPU total y por núcleo, memoria, GPUs con nombre y VRAM, y temperatura de las zonas térmicas ACPI) y el **menú Inicio estilo Windows 7**: programas más usados, «Todos los programas», búsqueda en vivo y columna derecha con carpetas, Equipo, Panel de control y apagado.
+
+          Los ajustes se guardan en `%APPDATA%\OptimizedShell\config.ini` y se aplican en caliente.
 
           SHA-256 de `OptimizedShell.exe`:
           `${{ steps.pack.outputs.hash }}`

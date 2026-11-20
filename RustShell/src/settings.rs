@@ -1,10 +1,17 @@
-// Configuración (--settings).
+// Configuración del sistema (--settings), al estilo de la Configuración de
+// Windows 11.
 //
-// La ventana no tiene los controles escritos a mano: recorre la tabla de
-// ajustes de `ui::config` y dibuja un control por entrada según su tipo
-// (interruptor, deslizador con pasos, control segmentado, tarjetas de modo o
-// selector de color). Añadir un ajuste nuevo a `config::ITEMS` lo hace aparecer
-// aquí sin tocar este archivo.
+// Estructura: barra lateral con buscador y categorías (Sistema, Bluetooth y
+// dispositivos, Red e Internet, Personalización, Aplicaciones, Accesibilidad,
+// Acerca de), página de inicio con la tarjeta del equipo y accesos a las
+// categorías, y páginas formadas por grupos de tarjetas.
+//
+// Los controles no están escritos a mano: cada ajuste de `ui::config` se
+// dibuja según su tipo (interruptor, deslizador, control segmentado, tarjetas
+// de modo o selector de color), así que añadir una fila a `config::ITEMS` y
+// citarla en un grupo basta para que aparezca aquí. Junto a los ajustes
+// propios hay filas de información del equipo y accesos a las páginas de
+// Windows (ms-settings:) que OptimizedShell no reimplementa.
 //
 // Cada cambio se aplica al momento, se guarda en %APPDATA%\OptimizedShell\
 // config.ini y se difunde al resto de ventanas de OptimizedShell.
@@ -14,52 +21,368 @@ use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT, VK_UP};
+use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT, VK_UP,
+};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::args;
+use crate::perf;
+use crate::sysinfo::{self, Net};
 use crate::ui::config::{self, Config, Id, Item, Kind, Page};
 use crate::ui::gdip::{Align, Gfx};
 use crate::ui::theme::{self, ACCENT_PRESETS};
 use crate::ui::{self, window};
 
-// ------------------------------------------------------------ navegación
-struct NavEntry {
-    glyph: &'static str,
-    title: &'static str,
-    page: Option<Page>,
-    /// Nombre admitido como argumento posicional (`--settings <arg>`).
-    arg: &'static str,
+// ============================================================ modelo de páginas
+/// Acción de una fila de enlace.
+#[derive(Clone, Copy, PartialEq)]
+enum Act {
+    /// Abre algo con el shell de Windows (ms-settings:, control.exe...).
+    Url(&'static str),
+    /// Lanza OptimizedShell con estos argumentos.
+    Own(&'static str),
 }
 
-const NAV: &[NavEntry] = &[
-    NavEntry { glyph: "\u{E771}", title: "Personalización", page: Some(Page::Apariencia), arg: "personalizacion" },
-    NavEntry { glyph: "\u{E7F4}", title: "Barra de tareas", page: Some(Page::Barra), arg: "barra" },
-    NavEntry { glyph: "\u{E700}", title: "Menú Inicio", page: Some(Page::Menu), arg: "menu" },
-    NavEntry { glyph: "\u{E8B7}", title: "Listas y explorador", page: Some(Page::Listas), arg: "listas" },
-    NavEntry { glyph: "\u{E9D9}", title: "Rendimiento", page: Some(Page::Rendimiento), arg: "rendimiento" },
-    NavEntry { glyph: "\u{E91B}", title: "Fondo de escritorio", page: None, arg: "fondo" },
-    NavEntry { glyph: "\u{E7F8}", title: "Pantalla", page: None, arg: "pantalla" },
-    NavEntry { glyph: "\u{E702}", title: "Bluetooth", page: None, arg: "bluetooth" },
+/// Dato del equipo que se enseña en una fila de solo lectura.
+#[derive(Clone, Copy, PartialEq)]
+enum InfoKind {
+    Equipo,
+    Usuario,
+    Windows,
+    Cpu,
+    Ram,
+    Red,
+    Bateria,
+    Bluetooth,
+    Audio,
+    Archivo,
+}
+
+#[derive(Clone, Copy)]
+enum Row {
+    /// Un ajuste de `config::ITEMS`.
+    S(Id),
+    Link { glyph: &'static str, title: &'static str, sub: &'static str, act: Act },
+    Info(InfoKind),
+}
+
+struct Group {
+    title: &'static str,
+    rows: &'static [Row],
+}
+
+struct NavPage {
+    glyph: &'static str,
+    title: &'static str,
+    sub: &'static str,
+    /// Nombre admitido como argumento posicional (`--settings <arg>`).
+    arg: &'static str,
+    /// Página de `config::Page` que restablece el botón «Restablecer».
+    reset: Option<Page>,
+    groups: &'static [Group],
+}
+
+// ------------------------------------------------------------ Sistema
+static SISTEMA: &[Group] = &[
+    Group { title: "Notificaciones", rows: &[
+        Row::S(Id::NotifActivadas),
+        Row::S(Id::NotifNoMolestar),
+        Row::S(Id::NotifSonido),
+        Row::S(Id::NotifDuracion),
+        Row::S(Id::NotifMax),
+        Row::S(Id::NotifAncho),
+        Row::S(Id::NotifPosicion),
+        Row::S(Id::NotifHistorial),
+    ]},
+    Group { title: "Energía y rendimiento", rows: &[
+        Row::S(Id::Eco),
+        Row::S(Id::LiberarMemoria),
+        Row::Info(InfoKind::Bateria),
+        Row::Link { glyph: "\u{E945}", title: "Energía y suspensión",
+                    sub: "Pantalla, suspensión y plan de energía de Windows",
+                    act: Act::Url("ms-settings:powersleep") },
+    ]},
+    Group { title: "Herramientas", rows: &[
+        Row::Link { glyph: "\u{E9D9}", title: "Administrador de tareas",
+                    sub: "Procesos, rendimiento, inicio y servicios", act: Act::Own("--taskmgr") },
+        Row::Link { glyph: "\u{EC50}", title: "Explorador de archivos",
+                    sub: "Abre el explorador de OptimizedShell", act: Act::Own("--explorer C:\\") },
+        Row::Link { glyph: "\u{E7F8}", title: "Pantalla",
+                    sub: "Resolución, escala y varios monitores", act: Act::Url("ms-settings:display") },
+        Row::Link { glyph: "\u{E8D6}", title: "Sonido",
+                    sub: "Dispositivos de salida y entrada", act: Act::Url("ms-settings:sound") },
+    ]},
 ];
 
-// ------------------------------------------------------------ zonas sensibles
+// ------------------------------------------------------------ dispositivos
+static DISPOSITIVOS: &[Group] = &[
+    Group { title: "Estado", rows: &[
+        Row::Info(InfoKind::Bluetooth),
+        Row::Info(InfoKind::Audio),
+    ]},
+    Group { title: "Área de notificación", rows: &[
+        Row::S(Id::BandejaBluetooth),
+        Row::S(Id::BandejaSonido),
+    ]},
+    Group { title: "Ajustes de Windows", rows: &[
+        Row::Link { glyph: "\u{E702}", title: "Bluetooth",
+                    sub: "Emparejar y administrar dispositivos", act: Act::Url("ms-settings:bluetooth") },
+        Row::Link { glyph: "\u{E749}", title: "Impresoras y escáneres",
+                    sub: "", act: Act::Url("ms-settings:printers") },
+        Row::Link { glyph: "\u{E962}", title: "Mouse y panel táctil",
+                    sub: "", act: Act::Url("ms-settings:mousetouchpad") },
+        Row::Link { glyph: "\u{E765}", title: "Teclado e idioma",
+                    sub: "", act: Act::Url("ms-settings:keyboard") },
+    ]},
+];
+
+// ------------------------------------------------------------ red
+static RED: &[Group] = &[
+    Group { title: "Estado", rows: &[
+        Row::Info(InfoKind::Red),
+    ]},
+    Group { title: "Área de notificación", rows: &[
+        Row::S(Id::BandejaRed),
+    ]},
+    Group { title: "Ajustes de Windows", rows: &[
+        Row::Link { glyph: "\u{E701}", title: "Wi-Fi",
+                    sub: "Redes disponibles y redes conocidas", act: Act::Url("ms-settings:network-wifi") },
+        Row::Link { glyph: "\u{E839}", title: "Ethernet",
+                    sub: "", act: Act::Url("ms-settings:network-ethernet") },
+        Row::Link { glyph: "\u{E968}", title: "Configuración de red avanzada",
+                    sub: "Adaptadores, uso de datos y restablecimiento",
+                    act: Act::Url("ms-settings:network-advancedsettings") },
+        Row::Link { glyph: "\u{E72E}", title: "Conexiones de red (clásico)",
+                    sub: "Panel de control", act: Act::Url("ncpa.cpl") },
+    ]},
+];
+
+// ------------------------------------------------------------ personalización
+static PERSONALIZACION: &[Group] = &[
+    Group { title: "Modo y color", rows: &[
+        Row::S(Id::Modo),
+        Row::S(Id::Acento),
+    ]},
+    Group { title: "Efectos", rows: &[
+        Row::S(Id::Desenfoque),
+        Row::S(Id::TinteFondo),
+        Row::S(Id::OpacidadBarra),
+        Row::S(Id::OpacidadVentanas),
+        Row::S(Id::Radio),
+    ]},
+    Group { title: "Texto y tamaño", rows: &[
+        Row::S(Id::Fuente),
+        Row::S(Id::EscalaTexto),
+        Row::S(Id::EscalaInterfaz),
+        Row::S(Id::ContrasteTexto),
+    ]},
+    Group { title: "Ventanas", rows: &[
+        Row::S(Id::AltoTitulo),
+        Row::S(Id::AnchoBotonTitulo),
+    ]},
+    Group { title: "Ajustes de Windows", rows: &[
+        Row::Link { glyph: "\u{E91B}", title: "Fondo de escritorio",
+                    sub: "Imagen, color sólido o presentación", act: Act::Url("ms-settings:personalization-background") },
+        Row::Link { glyph: "\u{E770}", title: "Pantalla de bloqueo",
+                    sub: "", act: Act::Url("ms-settings:lockscreen") },
+    ]},
+];
+
+// ------------------------------------------------------------ barra de tareas
+static BARRA: &[Group] = &[
+    Group { title: "Comportamiento de la barra", rows: &[
+        Row::S(Id::BarraAlto),
+        Row::S(Id::BarraPosicion),
+        Row::S(Id::BarraReservarArea),
+        Row::S(Id::BarraSiempreVisible),
+        Row::S(Id::BarraRefresco),
+    ]},
+    Group { title: "Botón Inicio", rows: &[
+        Row::S(Id::BarraMostrarInicio),
+        Row::S(Id::BarraInicioCentro),
+        Row::S(Id::BarraIconoInicio),
+        Row::S(Id::BarraIconoIndice),
+    ]},
+    Group { title: "Botones de las ventanas", rows: &[
+        Row::S(Id::BarraAlineacion),
+        Row::S(Id::BarraIconosApps),
+        Row::S(Id::BarraTamanoIcono),
+        Row::S(Id::BarraMostrarTitulos),
+        Row::S(Id::BarraAnchoBoton),
+    ]},
+    Group { title: "Área de notificación", rows: &[
+        Row::S(Id::BandejaMostrar),
+        Row::S(Id::BandejaSonido),
+        Row::S(Id::BandejaRed),
+        Row::S(Id::BandejaBateria),
+        Row::S(Id::BandejaPorcentajeBateria),
+        Row::S(Id::BandejaBluetooth),
+        Row::S(Id::BandejaNotificaciones),
+        Row::S(Id::BandejaSeparador),
+    ]},
+    Group { title: "Reloj", rows: &[
+        Row::S(Id::BarraMostrarReloj),
+        Row::S(Id::BarraReloj24h),
+        Row::S(Id::BarraSegundos),
+        Row::S(Id::BarraFecha),
+    ]},
+];
+
+// ------------------------------------------------------------ menú Inicio
+static MENU: &[Group] = &[
+    Group { title: "Tamaño", rows: &[
+        Row::S(Id::MenuAncho),
+        Row::S(Id::MenuAlto),
+        Row::S(Id::MenuAltoElemento),
+    ]},
+    Group { title: "Contenido", rows: &[
+        Row::S(Id::MenuBusqueda),
+        Row::S(Id::MenuFrecuentes),
+        Row::S(Id::MenuColumnaDerecha),
+        Row::S(Id::MenuIconos),
+        Row::S(Id::MenuIconosApps),
+    ]},
+    Group { title: "Acciones", rows: &[
+        Row::S(Id::MenuEjecutar),
+        Row::S(Id::MenuBloquear),
+        Row::S(Id::MenuApagado),
+    ]},
+];
+
+// ------------------------------------------------------------ aplicaciones
+static APLICACIONES: &[Group] = &[
+    Group { title: "Listas", rows: &[
+        Row::S(Id::ListaAltoFila),
+    ]},
+    Group { title: "Explorador de archivos", rows: &[
+        Row::S(Id::ExplPanelLateral),
+        Row::S(Id::ExplOcultos),
+        Row::S(Id::ExplCarpetasPrimero),
+        Row::S(Id::ExplColumnaFecha),
+        Row::S(Id::ExplColumnaTipo),
+        Row::S(Id::ExplColumnaTamano),
+    ]},
+    Group { title: "Administrador de tareas", rows: &[
+        Row::S(Id::TaskmgrRefresco),
+        Row::S(Id::PerfPorNucleo),
+        Row::S(Id::PerfHistorial),
+    ]},
+    Group { title: "Ajustes de Windows", rows: &[
+        Row::Link { glyph: "\u{E71D}", title: "Aplicaciones instaladas",
+                    sub: "", act: Act::Url("ms-settings:appsfeatures") },
+        Row::Link { glyph: "\u{E8FC}", title: "Aplicaciones predeterminadas",
+                    sub: "", act: Act::Url("ms-settings:defaultapps") },
+        Row::Link { glyph: "\u{E713}", title: "Panel de control",
+                    sub: "Herramientas clásicas de Windows", act: Act::Url("control.exe") },
+    ]},
+];
+
+// ------------------------------------------------------------ accesibilidad
+static ACCESIBILIDAD: &[Group] = &[
+    Group { title: "Tamaño y legibilidad", rows: &[
+        Row::S(Id::EscalaTexto),
+        Row::S(Id::EscalaInterfaz),
+        Row::S(Id::ContrasteTexto),
+        Row::S(Id::ListaAltoFila),
+    ]},
+    Group { title: "Efectos visuales", rows: &[
+        Row::S(Id::Desenfoque),
+        Row::S(Id::OpacidadVentanas),
+    ]},
+    Group { title: "Ajustes de Windows", rows: &[
+        Row::Link { glyph: "\u{E7F8}", title: "Accesibilidad de Windows",
+                    sub: "Lupa, narrador, contraste alto", act: Act::Url("ms-settings:easeofaccess") },
+    ]},
+];
+
+// ------------------------------------------------------------ acerca de
+static ACERCA: &[Group] = &[
+    Group { title: "Especificaciones del dispositivo", rows: &[
+        Row::Info(InfoKind::Equipo),
+        Row::Info(InfoKind::Usuario),
+        Row::Info(InfoKind::Cpu),
+        Row::Info(InfoKind::Ram),
+    ]},
+    Group { title: "Especificaciones de Windows", rows: &[
+        Row::Info(InfoKind::Windows),
+    ]},
+    Group { title: "OptimizedShell", rows: &[
+        Row::Info(InfoKind::Archivo),
+        Row::Link { glyph: "\u{E8A5}", title: "Abrir config.ini",
+                    sub: "Editar los ajustes a mano", act: Act::Own("--abrir-ini") },
+        Row::Link { glyph: "\u{E7E8}", title: "Usar OptimizedShell como shell",
+                    sub: "Sustituye al Explorador al iniciar sesión", act: Act::Own("--install") },
+        Row::Link { glyph: "\u{E7A7}", title: "Restaurar el Explorador de Windows",
+                    sub: "Deshace el cambio anterior", act: Act::Own("--uninstall") },
+    ]},
+];
+
+static NAV: &[NavPage] = &[
+    NavPage { glyph: "\u{E80F}", title: "Inicio", sub: "", arg: "inicio", reset: None, groups: &[] },
+    NavPage { glyph: "\u{E770}", title: "Sistema",
+        sub: "Notificaciones, energía, rendimiento y herramientas",
+        arg: "sistema", reset: Some(Page::Notificaciones), groups: SISTEMA },
+    NavPage { glyph: "\u{E702}", title: "Bluetooth y dispositivos",
+        sub: "Bluetooth, sonido, impresoras y periféricos",
+        arg: "bluetooth", reset: None, groups: DISPOSITIVOS },
+    NavPage { glyph: "\u{E701}", title: "Red e Internet",
+        sub: "Wi-Fi, Ethernet y estado de la conexión",
+        arg: "red", reset: None, groups: RED },
+    NavPage { glyph: "\u{E771}", title: "Personalización",
+        sub: "Color, tema, texto y efectos de toda la interfaz",
+        arg: "personalizacion", reset: Some(Page::Apariencia), groups: PERSONALIZACION },
+    NavPage { glyph: "\u{E7F4}", title: "Barra de tareas",
+        sub: "Botón Inicio, ventanas, área de notificación y reloj",
+        arg: "barra", reset: Some(Page::Barra), groups: BARRA },
+    NavPage { glyph: "\u{E700}", title: "Menú Inicio",
+        sub: "Tamaño, búsqueda y contenido del menú",
+        arg: "menu", reset: Some(Page::Menu), groups: MENU },
+    NavPage { glyph: "\u{E71D}", title: "Aplicaciones",
+        sub: "Explorador, administrador de tareas y listas",
+        arg: "aplicaciones", reset: Some(Page::Listas), groups: APLICACIONES },
+    NavPage { glyph: "\u{E776}", title: "Accesibilidad",
+        sub: "Tamaño del texto, contraste y efectos",
+        arg: "accesibilidad", reset: None, groups: ACCESIBILIDAD },
+    NavPage { glyph: "\u{E946}", title: "Acerca de",
+        sub: "Información del equipo y de OptimizedShell",
+        arg: "acerca", reset: None, groups: ACERCA },
+];
+
+/// Alias admitidos por compatibilidad con los argumentos antiguos.
+fn page_for_arg(arg: &str) -> usize {
+    let a = arg.to_lowercase();
+    if let Some(i) = NAV.iter().position(|n| n.arg == a) {
+        return i;
+    }
+    match a.as_str() {
+        "notificaciones" | "rendimiento" | "pantalla" => 1,
+        "listas" | "explorador" => 7,
+        "fondo" | "apariencia" | "tema" => 4,
+        "bandeja" => 5,
+        _ => 0,
+    }
+}
+
+// ============================================================ zonas sensibles
 #[derive(Clone, Copy, PartialEq)]
 enum Hit {
     None,
     Min,
+    Max,
     Close,
     Nav(usize),
-    /// Interruptor de un ajuste booleano.
+    Search,
+    ClearSearch,
+    Tile(usize),
+    /// Fila de enlace (índice dentro de `links`).
+    Link(usize),
     Toggle(Id),
-    /// Opción de un control segmentado o de unas tarjetas de modo.
     Choice(Id, i32),
-    /// Deslizador: canal 0 = valor; 1/2/3 = R/G/B de un color.
     Slider(Id, u8),
-    /// Botones − / + de un entero.
     Step(Id, i32),
-    /// Muestra de color predefinida.
     Swatch(usize),
     WinAccent,
     ResetPage,
@@ -67,9 +390,31 @@ enum Hit {
     OpenIni,
 }
 
+enum BlockKind {
+    Setting(&'static Item),
+    Header(&'static str),
+    Link(usize),
+    Info(InfoKind),
+}
+
 struct Block {
-    item: &'static Item,
+    kind: BlockKind,
     rect: RECT,
+}
+
+/// Datos del equipo, refrescados de vez en cuando (no en cada repintado).
+#[derive(Default, Clone)]
+struct SysInfo {
+    equipo: String,
+    usuario: String,
+    windows: String,
+    cpu: String,
+    ram: String,
+    red: String,
+    bateria: String,
+    bluetooth: String,
+    audio: String,
+    archivo: String,
 }
 
 struct State {
@@ -78,16 +423,22 @@ struct State {
     hover: Hit,
     scroll: i32,
     content_h: i32,
-    /// Ajuste que se está arrastrando (deslizador) y su canal.
     drag: Option<(Id, u8)>,
+    search: String,
+    searching: bool,
+    info: SysInfo,
     // layout
     x0: i32,
     cw: i32,
     content_rc: RECT,
     nav: Vec<RECT>,
+    search_rc: RECT,
+    tiles: Vec<RECT>,
     blocks: Vec<Block>,
+    links: Vec<(&'static str, &'static str, &'static str, Act)>,
     hits: Vec<(RECT, Hit)>,
     min_rc: RECT,
+    max_rc: RECT,
     close_rc: RECT,
     reset_page_rc: RECT,
     reset_all_rc: RECT,
@@ -110,7 +461,7 @@ fn rh(r: &RECT) -> i32 {
     r.bottom - r.top
 }
 
-// ------------------------------------------------- geometría de los controles
+// ============================================ geometría de los controles
 // Las mismas funciones se usan al medir (layout) y al dibujar (paint), para que
 // lo que se ve y lo que se puede pulsar no se separen nunca.
 
@@ -118,7 +469,6 @@ fn has_help(it: &Item) -> bool {
     !it.help.is_empty()
 }
 
-/// Primera línea libre dentro de la tarjeta de un ajuste.
 fn body_top(r: &RECT, it: &Item) -> i32 {
     r.top + if has_help(it) { ui::s(48) } else { ui::s(34) }
 }
@@ -186,7 +536,6 @@ fn swatch_rects(r: &RECT) -> Vec<RECT> {
     out
 }
 
-/// Pistas R/G/B del selector de color, bajo las muestras.
 fn color_tracks(r: &RECT) -> [RECT; 3] {
     let y0 = swatch_rects(r).last().map(|s| s.bottom).unwrap_or(r.top) + ui::s(26);
     let w = rw(r) - ui::s(32) - ui::s(60);
@@ -218,7 +567,173 @@ fn block_height(it: &Item, cw: i32) -> i32 {
     }
 }
 
-// ---------------------------------------------------------------- layout
+fn link_height() -> i32 {
+    ui::s(60)
+}
+fn header_height() -> i32 {
+    ui::s(38)
+}
+
+// ============================================================ información
+fn computer_name() -> String {
+    unsafe {
+        let mut buf = [0u16; 256];
+        let mut len = buf.len() as u32;
+        if windows_sys::Win32::System::SystemInformation::GetComputerNameExW(
+            windows_sys::Win32::System::SystemInformation::ComputerNameDnsHostname,
+            buf.as_mut_ptr(), &mut len) != 0
+        {
+            return String::from_utf16_lossy(&buf[..len as usize]);
+        }
+    }
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Equipo".into())
+}
+
+fn reg_string(sub: &str, name: &str) -> String {
+    use windows_sys::Win32::System::Registry::*;
+    unsafe {
+        let mut k: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, ui::wide(sub).as_ptr(), 0, KEY_QUERY_VALUE, &mut k) != 0 {
+            return String::new();
+        }
+        let mut buf = [0u16; 256];
+        let mut len = (buf.len() * 2) as u32;
+        let mut kind = 0u32;
+        let ok = RegQueryValueExW(k, ui::wide(name).as_ptr(), std::ptr::null_mut(), &mut kind,
+                                  buf.as_mut_ptr() as *mut u8, &mut len) == 0;
+        RegCloseKey(k);
+        if !ok {
+            return String::new();
+        }
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..n])
+    }
+}
+
+/// Valor numérico del registro (UBR y compañía se guardan como REG_DWORD).
+fn reg_dword(sub: &str, name: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::*;
+    unsafe {
+        let mut k: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, ui::wide(sub).as_ptr(), 0, KEY_QUERY_VALUE, &mut k) != 0 {
+            return None;
+        }
+        let mut v = 0u32;
+        let mut len = 4u32;
+        let mut kind = 0u32;
+        let ok = RegQueryValueExW(k, ui::wide(name).as_ptr(), std::ptr::null_mut(), &mut kind,
+                                  &mut v as *mut u32 as *mut u8, &mut len) == 0;
+        RegCloseKey(k);
+        if ok { Some(v) } else { None }
+    }
+}
+
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+fn collect_info() -> SysInfo {
+    const WINVER: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+    let cpu = perf::cpu_info();
+    let mut mem: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    mem.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    unsafe { GlobalMemoryStatusEx(&mut mem) };
+
+    let product = reg_string(WINVER, "ProductName");
+    let display = reg_string(WINVER, "DisplayVersion");
+    let build = reg_string(WINVER, "CurrentBuild");
+    let ubr = reg_dword(WINVER, "UBR").map(|v| v.to_string()).unwrap_or_default();
+    let windows = {
+        let mut s = if product.is_empty() { "Windows".to_string() } else { product };
+        if !display.is_empty() {
+            s.push_str(&format!(" · versión {}", display));
+        }
+        if !build.is_empty() {
+            s.push_str(&format!(" · compilación {}", build));
+            if !ubr.is_empty() {
+                s.push_str(&format!(".{}", ubr));
+            }
+        }
+        s
+    };
+
+    let net = match sysinfo::network() {
+        Net::Off => "Sin conexión".to_string(),
+        Net::Ethernet { mbps } if mbps > 0 => format!("Ethernet conectado · {} Mbps", mbps),
+        Net::Ethernet { .. } => "Ethernet conectado".to_string(),
+        Net::Wifi { ssid, quality } => format!("Wi-Fi: {} · señal {} %", ssid, quality),
+    };
+    let b = sysinfo::battery();
+    let bateria = if !b.present {
+        "Sin batería (equipo de escritorio)".to_string()
+    } else if b.charging {
+        format!("{} %, conectado a la corriente", b.percent.max(0))
+    } else if b.seconds_left > 0 {
+        format!("{} %, quedan {} h {:02} min", b.percent.max(0), b.seconds_left / 3600,
+                (b.seconds_left % 3600) / 60)
+    } else {
+        format!("{} %, con batería", b.percent.max(0))
+    };
+    let bluetooth = match sysinfo::bluetooth() {
+        Some(true) => "Radio Bluetooth disponible".to_string(),
+        Some(false) => "Sin radio Bluetooth activa".to_string(),
+        None => "Este equipo no tiene Bluetooth".to_string(),
+    };
+    let audio = match sysinfo::volume() {
+        Some((v, true)) => format!("Silenciado (volumen {} %)", v),
+        Some((v, false)) => format!("Volumen al {} %", v),
+        None => "Sin dispositivo de salida".to_string(),
+    };
+
+    SysInfo {
+        equipo: computer_name(),
+        usuario: std::env::var("USERNAME").unwrap_or_else(|_| "Usuario".into()),
+        windows,
+        cpu: if cpu.name.is_empty() {
+            format!("{} núcleos lógicos", cpu.logical)
+        } else {
+            format!("{} · {} núcleos ({} físicos)", cpu.name, cpu.logical, cpu.physical)
+        },
+        ram: format!("{} instalados · {} en uso", gb(mem.ullTotalPhys),
+                     gb(mem.ullTotalPhys - mem.ullAvailPhys)),
+        red: net,
+        bateria,
+        bluetooth,
+        audio,
+        archivo: config::config_file().to_string_lossy().to_string(),
+    }
+}
+
+fn info_row(info: &SysInfo, kind: InfoKind) -> (&'static str, &'static str, String) {
+    match kind {
+        InfoKind::Equipo => ("\u{E977}", "Nombre del equipo", info.equipo.clone()),
+        InfoKind::Usuario => ("\u{E77B}", "Usuario", info.usuario.clone()),
+        InfoKind::Windows => ("\u{E770}", "Edición de Windows", info.windows.clone()),
+        InfoKind::Cpu => ("\u{E950}", "Procesador", info.cpu.clone()),
+        InfoKind::Ram => ("\u{EEA0}", "Memoria RAM", info.ram.clone()),
+        InfoKind::Red => ("\u{E704}", "Conexión actual", info.red.clone()),
+        InfoKind::Bateria => ("\u{E83E}", "Batería", info.bateria.clone()),
+        InfoKind::Bluetooth => ("\u{E702}", "Bluetooth", info.bluetooth.clone()),
+        InfoKind::Audio => ("\u{E767}", "Salida de audio", info.audio.clone()),
+        InfoKind::Archivo => ("\u{E8A5}", "Archivo de configuración", info.archivo.clone()),
+    }
+}
+
+// ============================================================ layout
+/// Ajustes que coinciden con el texto buscado, en todas las páginas.
+fn search_results(q: &str) -> Vec<&'static Item> {
+    let q = q.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    config::ITEMS
+        .iter()
+        .filter(|it| {
+            it.label.to_lowercase().contains(&q) || it.help.to_lowercase().contains(&q)
+        })
+        .collect()
+}
+
 fn layout(st: &mut State) {
     let mut rc = er();
     unsafe { GetClientRect(st.hwnd, &mut rc) };
@@ -227,31 +742,36 @@ fn layout(st: &mut State) {
     let cap = ui::caption_h();
     let ch = ui::gdip::chrome_rects(w);
     st.min_rc = rect(ch.min.0, ch.min.1, ch.min.2, ch.min.3);
+    st.max_rc = rect(ch.max.0, ch.max.1, ch.max.2, ch.max.3);
     st.close_rc = rect(ch.close.0, ch.close.1, ch.close.2, ch.close.3);
 
-    let nav_w = ui::s(226);
+    let nav_w = ui::s(244);
+    st.search_rc = rect(ui::s(12), cap + ui::s(12), nav_w - ui::s(24), ui::s(34));
+    let nav_top = st.search_rc.bottom + ui::s(12);
     st.nav = (0..NAV.len())
-        .map(|i| rect(ui::s(10), cap + ui::s(16) + i as i32 * ui::s(42), nav_w - ui::s(20), ui::s(38)))
+        .map(|i| rect(ui::s(10), nav_top + i as i32 * ui::s(40), nav_w - ui::s(20), ui::s(36)))
         .collect();
 
-    st.x0 = nav_w + ui::s(24);
-    st.cw = (w - st.x0 - ui::s(24)).max(ui::s(240));
+    st.x0 = nav_w + ui::s(28);
+    st.cw = (w - st.x0 - ui::s(28)).max(ui::s(240));
     let footer_h = ui::s(58);
-    let top = cap + ui::s(56);
+    let top = cap + ui::s(78);
     st.content_rc = rect(st.x0, top, st.cw, (h - top - footer_h).max(ui::s(80)));
 
-    // Botones del pie.
     let by = h - ui::s(46);
     let bw = ui::s(170);
     st.reset_page_rc = rect(st.x0, by, bw, ui::s(32));
     st.reset_all_rc = rect(st.x0 + bw + ui::s(10), by, ui::s(140), ui::s(32));
     st.open_ini_rc = rect(st.x0 + bw + ui::s(160), by, ui::s(150), ui::s(32));
 
-    // Bloques de la página activa.
     st.blocks.clear();
+    st.links.clear();
+    st.tiles.clear();
     st.hits.clear();
     st.hits.push((st.close_rc, Hit::Close));
+    st.hits.push((st.max_rc, Hit::Max));
     st.hits.push((st.min_rc, Hit::Min));
+    st.hits.push((st.search_rc, Hit::Search));
     for (i, r) in st.nav.iter().enumerate() {
         st.hits.push((*r, Hit::Nav(i)));
     }
@@ -259,21 +779,61 @@ fn layout(st: &mut State) {
     st.hits.push((st.reset_all_rc, Hit::ResetAll));
     st.hits.push((st.open_ini_rc, Hit::OpenIni));
 
-    let page = match NAV[st.page].page {
-        Some(p) => p,
-        None => {
-            st.content_h = 0;
-            st.scroll = 0;
-            return;
-        }
-    };
-
     let mut y = 0;
     let gap = ui::s(10);
-    for it in config::items_of(page) {
-        let hgt = block_height(it, st.cw);
-        st.blocks.push(Block { item: it, rect: rect(st.x0, y, st.cw, hgt) });
-        y += hgt + gap;
+
+    if !st.search.trim().is_empty() {
+        // Resultados de la búsqueda: una lista plana de ajustes.
+        st.blocks.push(Block { kind: BlockKind::Header("Resultados"), rect: rect(st.x0, y, st.cw, header_height()) });
+        y += header_height();
+        for it in search_results(&st.search) {
+            let hgt = block_height(it, st.cw);
+            st.blocks.push(Block { kind: BlockKind::Setting(it), rect: rect(st.x0, y, st.cw, hgt) });
+            y += hgt + gap;
+        }
+    } else if st.page == 0 {
+        // Página de inicio: tarjeta del equipo y accesos a las categorías.
+        let card_h = ui::s(96);
+        y += card_h + ui::s(18);
+        let cols = if st.cw > ui::s(680) { 2 } else { 1 };
+        let tgap = ui::s(12);
+        let tw = (st.cw - tgap * (cols - 1)) / cols;
+        let th = ui::s(72);
+        for i in 1..NAV.len() {
+            let k = (i - 1) as i32;
+            let r = rect(st.x0 + (k % cols) * (tw + tgap), y + (k / cols) * (th + tgap), tw, th);
+            st.tiles.push(r);
+        }
+        let rows = ((NAV.len() - 1) as i32 + cols - 1) / cols;
+        y += rows * (th + tgap);
+    } else {
+        for grp in NAV[st.page].groups {
+            if !grp.title.is_empty() {
+                st.blocks.push(Block { kind: BlockKind::Header(grp.title), rect: rect(st.x0, y, st.cw, header_height()) });
+                y += header_height();
+            }
+            for row in grp.rows {
+                match row {
+                    Row::S(id) => {
+                        let it = config::item(*id);
+                        let hgt = block_height(it, st.cw);
+                        st.blocks.push(Block { kind: BlockKind::Setting(it), rect: rect(st.x0, y, st.cw, hgt) });
+                        y += hgt + gap;
+                    }
+                    Row::Link { glyph, title, sub, act } => {
+                        let idx = st.links.len();
+                        st.links.push((glyph, title, sub, *act));
+                        st.blocks.push(Block { kind: BlockKind::Link(idx), rect: rect(st.x0, y, st.cw, link_height()) });
+                        y += link_height() + gap;
+                    }
+                    Row::Info(kind) => {
+                        st.blocks.push(Block { kind: BlockKind::Info(*kind), rect: rect(st.x0, y, st.cw, link_height()) });
+                        y += link_height() + gap;
+                    }
+                }
+            }
+            y += ui::s(8);
+        }
     }
     st.content_h = y;
     let max_scroll = (st.content_h - rh(&st.content_rc)).max(0);
@@ -281,44 +841,53 @@ fn layout(st: &mut State) {
 
     // Zonas sensibles, ya desplazadas.
     let dy = st.content_rc.top - st.scroll;
+    for (i, r) in st.tiles.iter().enumerate() {
+        st.hits.push((rect(r.left, r.top + dy, rw(r), rh(r)), Hit::Tile(i + 1)));
+    }
     for b in st.blocks.iter() {
         let r = rect(b.rect.left, b.rect.top + dy, rw(&b.rect), rh(&b.rect));
-        let it = b.item;
-        match it.kind {
-            Kind::Bool => st.hits.push((r, Hit::Toggle(it.id))),
-            Kind::Int { .. } => {
-                let (m, p) = stepper_rects(&r);
-                st.hits.push((m, Hit::Step(it.id, -1)));
-                st.hits.push((p, Hit::Step(it.id, 1)));
-                let t = track_rect(&r);
-                st.hits.push((rect(t.left - ui::s(8), t.top - ui::s(12), rw(&t) + ui::s(16), ui::s(28)), Hit::Slider(it.id, 0)));
-            }
-            Kind::Choice(opts) => {
-                for (i, cr) in chip_rects(&r, opts, it).into_iter().enumerate() {
-                    st.hits.push((cr, Hit::Choice(it.id, i as i32)));
+        match &b.kind {
+            BlockKind::Header(_) | BlockKind::Info(_) => {}
+            BlockKind::Link(i) => st.hits.push((r, Hit::Link(*i))),
+            BlockKind::Setting(it) => {
+                let it = *it;
+                match it.kind {
+                    Kind::Bool => st.hits.push((r, Hit::Toggle(it.id))),
+                    Kind::Int { .. } => {
+                        let (m, p) = stepper_rects(&r);
+                        st.hits.push((m, Hit::Step(it.id, -1)));
+                        st.hits.push((p, Hit::Step(it.id, 1)));
+                        let t = track_rect(&r);
+                        st.hits.push((rect(t.left - ui::s(8), t.top - ui::s(12), rw(&t) + ui::s(16), ui::s(28)),
+                                      Hit::Slider(it.id, 0)));
+                    }
+                    Kind::Choice(opts) => {
+                        for (i, cr) in chip_rects(&r, opts, it).into_iter().enumerate() {
+                            st.hits.push((cr, Hit::Choice(it.id, i as i32)));
+                        }
+                    }
+                    Kind::Cards(_) => {
+                        let (a, b2) = card_rects(&r);
+                        st.hits.push((a, Hit::Choice(it.id, 0)));
+                        st.hits.push((b2, Hit::Choice(it.id, 1)));
+                    }
+                    Kind::Color => {
+                        for (i, sr) in swatch_rects(&r).into_iter().enumerate() {
+                            st.hits.push((sr, Hit::Swatch(i)));
+                        }
+                        for (i, t) in color_tracks(&r).iter().enumerate() {
+                            st.hits.push((rect(t.left - ui::s(8), t.top - ui::s(12), rw(t) + ui::s(16), ui::s(28)),
+                                          Hit::Slider(it.id, i as u8 + 1)));
+                        }
+                        st.hits.push((winaccent_rect(&r), Hit::WinAccent));
+                    }
                 }
-            }
-            Kind::Cards(_) => {
-                let (a, b2) = card_rects(&r);
-                st.hits.push((a, Hit::Choice(it.id, 0)));
-                st.hits.push((b2, Hit::Choice(it.id, 1)));
-            }
-            Kind::Color => {
-                for (i, sr) in swatch_rects(&r).into_iter().enumerate() {
-                    st.hits.push((sr, Hit::Swatch(i)));
-                }
-                for (i, t) in color_tracks(&r).iter().enumerate() {
-                    st.hits.push((rect(t.left - ui::s(8), t.top - ui::s(12), rw(t) + ui::s(16), ui::s(28)),
-                                  Hit::Slider(it.id, i as u8 + 1)));
-                }
-                st.hits.push((winaccent_rect(&r), Hit::WinAccent));
             }
         }
     }
 }
 
-// ---------------------------------------------------------------- aplicar
-/// Guarda (si toca), recalcula el tema y avisa al resto de ventanas.
+// ============================================================ aplicar
 fn commit(st: &mut State, c: &Config, persist: bool) {
     ui::apply_config(c, persist);
     ui::broadcast_config_changed();
@@ -340,75 +909,194 @@ fn windows_accent() -> u32 {
     theme::colorref(59, 130, 246)
 }
 
-// ---------------------------------------------------------------- pintado
+// ============================================================ pintado
 fn paint(st: &State) {
     let cfg = config::current();
     window::paint_buffered(st.hwnd, |g: &Gfx, w, h| {
         let s = theme::style();
         let cap = ui::caption_h();
-        // marco
+        let nav_w = ui::s(244);
+        // ---- marco
         g.clear(theme::argb(0, 0, 0, 0));
         g.rounded(0.0, 0.0, w as f32, h as f32, ui::sf(10.0), Some(s.window_bg), Some((s.card_border, 1.0)));
         g.fill_rect(0, 0, w, cap, s.title_bg);
         g.hline(0, w, cap - 1, s.separator);
         let ic = ui::s(20);
-        g.rounded(ui::s(14) as f32, ((cap - ic) / 2) as f32, ic as f32, ic as f32, ui::sf(4.0), Some(s.accent_solid), None);
-        g.text_in("\u{E713}", ui::s(14) as f32, ((cap - ic) / 2) as f32, ic as f32, ic as f32, 12.0, false, s.on_accent, Align::Center, Align::Center, true);
-        g.text_in("Configuración", ui::s(42) as f32, 0.0, (w - ui::s(200)) as f32, cap as f32, 14.0, true, s.text, Align::Near, Align::Center, false);
+        g.rounded(ui::s(14) as f32, ((cap - ic) / 2) as f32, ic as f32, ic as f32, ui::sf(4.0),
+                  Some(s.accent_solid), None);
+        g.text_in("\u{E713}", ui::s(14) as f32, ((cap - ic) / 2) as f32, ic as f32, ic as f32, 12.0, false,
+                  s.on_accent, Align::Center, Align::Center, true);
+        g.text_in("Configuración", ui::s(42) as f32, 0.0, (w - ui::s(260)) as f32, cap as f32, 14.0, true,
+                  s.text, Align::Near, Align::Center, false);
         chrome_btn(g, &s, st.min_rc, "\u{E921}", st.hover == Hit::Min, false);
+        chrome_btn(g, &s, st.max_rc, if unsafe { IsZoomed(st.hwnd) } != 0 { "\u{E923}" } else { "\u{E922}" },
+                   st.hover == Hit::Max, false);
         chrome_btn(g, &s, st.close_rc, "\u{E8BB}", st.hover == Hit::Close, true);
 
-        // navegación
-        g.fill_rect(0, cap, ui::s(226), h - cap, s.nav_bg);
+        // ---- barra lateral
+        g.fill_rect(0, cap, nav_w, h - cap, s.nav_bg);
+        // buscador
+        let sr = st.search_rc;
+        let focus = st.searching;
+        g.rounded(sr.left as f32, sr.top as f32, rw(&sr) as f32, rh(&sr) as f32, ui::sf(6.0),
+                  Some(s.control_bg), Some((if focus { s.accent_solid } else { s.control_border },
+                                            if focus { 1.6 } else { 1.0 })));
+        g.text_in("\u{E721}", (sr.left + ui::s(8)) as f32, sr.top as f32, ui::s(20) as f32, rh(&sr) as f32,
+                  10.0, false, s.text_dim, Align::Center, Align::Center, true);
+        let (txt, col) = if st.search.is_empty() {
+            ("Buscar un valor".to_string(), s.text_faint)
+        } else {
+            (st.search.clone(), s.text)
+        };
+        g.text_in(&txt, (sr.left + ui::s(32)) as f32, sr.top as f32, (rw(&sr) - ui::s(56)) as f32,
+                  rh(&sr) as f32, 11.5, false, col, Align::Near, Align::Center, false);
+        if !st.search.is_empty() {
+            g.text_in("\u{E8BB}", (sr.right - ui::s(24)) as f32, sr.top as f32, ui::s(20) as f32,
+                      rh(&sr) as f32, 8.0, false, s.text_dim, Align::Center, Align::Center, true);
+        }
+        // categorías
         for (i, r) in st.nav.iter().enumerate() {
-            let active = i == st.page;
+            let active = i == st.page && st.search.trim().is_empty();
             if active {
-                g.rounded(r.left as f32, r.top as f32, rw(r) as f32, rh(r) as f32, ui::sf(6.0), Some(s.row_selected), None);
-                g.rounded(r.left as f32, (r.top + ui::s(10)) as f32, ui::s(3) as f32, (rh(r) - ui::s(20)) as f32, ui::sf(1.5), Some(s.accent), None);
+                g.rounded(r.left as f32, r.top as f32, rw(r) as f32, rh(r) as f32, ui::sf(6.0),
+                          Some(s.row_selected), None);
+                g.rounded(r.left as f32, (r.top + ui::s(9)) as f32, ui::s(3) as f32,
+                          (rh(r) - ui::s(18)) as f32, ui::sf(1.5), Some(s.accent), None);
             } else if st.hover == Hit::Nav(i) {
-                g.rounded(r.left as f32, r.top as f32, rw(r) as f32, rh(r) as f32, ui::sf(6.0), Some(s.row_hover), None);
+                g.rounded(r.left as f32, r.top as f32, rw(r) as f32, rh(r) as f32, ui::sf(6.0),
+                          Some(s.row_hover), None);
             }
             let col = if active { s.accent } else { s.text_dim };
-            g.text_in(NAV[i].glyph, (r.left + ui::s(10)) as f32, r.top as f32, ui::s(24) as f32, rh(r) as f32, 12.0, false, col, Align::Center, Align::Center, true);
-            g.text_in(NAV[i].title, (r.left + ui::s(44)) as f32, r.top as f32, (rw(r) - ui::s(48)) as f32, rh(r) as f32, 13.0, false, s.text, Align::Near, Align::Center, false);
+            g.text_in(NAV[i].glyph, (r.left + ui::s(10)) as f32, r.top as f32, ui::s(24) as f32,
+                      rh(r) as f32, 12.0, false, col, Align::Center, Align::Center, true);
+            g.text_in(NAV[i].title, (r.left + ui::s(44)) as f32, r.top as f32, (rw(r) - ui::s(48)) as f32,
+                      rh(r) as f32, 12.5, false, s.text, Align::Near, Align::Center, false);
         }
 
-        // título de la página
-        g.text_in(NAV[st.page].title, st.x0 as f32, (cap + ui::s(10)) as f32, st.cw as f32, ui::s(34) as f32, 19.0, true, s.text, Align::Near, Align::Center, false);
-
-        if NAV[st.page].page.is_none() {
-            g.text_in("Esta sección se añadirá en una próxima iteración del port a Rust.",
-                      st.x0 as f32, st.content_rc.top as f32, st.cw as f32, ui::s(28) as f32,
-                      13.0, false, s.text_faint, Align::Near, Align::Center, false);
+        // ---- cabecera de la página
+        let searching = !st.search.trim().is_empty();
+        let (title, sub) = if searching {
+            (format!("Resultados de «{}»", st.search.trim()),
+             format!("{} ajustes coinciden", search_results(&st.search).len()))
+        } else if st.page == 0 {
+            ("Configuración".to_string(), format!("{} · {}", st.info.equipo, st.info.usuario))
         } else {
-            // contenido desplazable
-            let cr = st.content_rc;
-            g.set_clip(cr.left, cr.top, rw(&cr), rh(&cr));
-            let dy = cr.top - st.scroll;
-            for b in st.blocks.iter() {
-                let r = rect(b.rect.left, b.rect.top + dy, rw(&b.rect), rh(&b.rect));
-                if r.bottom < cr.top || r.top > cr.bottom {
-                    continue; // fuera de la vista
-                }
-                paint_block(g, &s, st, &cfg, b.item, &r);
+            (NAV[st.page].title.to_string(), NAV[st.page].sub.to_string())
+        };
+        g.text_in(&title, st.x0 as f32, (cap + ui::s(16)) as f32, st.cw as f32, ui::s(32) as f32, 20.0, true,
+                  s.text, Align::Near, Align::Center, false);
+        g.text_in(&sub, st.x0 as f32, (cap + ui::s(46)) as f32, st.cw as f32, ui::s(20) as f32, 11.5, false,
+                  s.text_dim, Align::Near, Align::Center, false);
+
+        // ---- contenido desplazable
+        let cr = st.content_rc;
+        g.set_clip(cr.left, cr.top, rw(&cr), rh(&cr));
+        let dy = cr.top - st.scroll;
+        if st.page == 0 && !searching {
+            paint_home(g, &s, st, dy);
+        }
+        for b in st.blocks.iter() {
+            let r = rect(b.rect.left, b.rect.top + dy, rw(&b.rect), rh(&b.rect));
+            if r.bottom < cr.top || r.top > cr.bottom {
+                continue;
             }
-            g.reset_clip();
-            // indicador de desplazamiento
-            let max_scroll = (st.content_h - rh(&cr)).max(0);
-            if max_scroll > 0 {
-                let bar_h = (rh(&cr) * rh(&cr) / st.content_h.max(1)).max(ui::s(30));
-                let by = cr.top + (rh(&cr) - bar_h) * st.scroll / max_scroll;
-                g.rounded((cr.right + ui::s(6)) as f32, by as f32, ui::s(4) as f32, bar_h as f32,
-                          ui::sf(2.0), Some(s.track), None);
+            match &b.kind {
+                BlockKind::Header(t) => {
+                    g.text_in(t, r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, 12.5, true,
+                              s.text, Align::Near, Align::Far, false);
+                }
+                BlockKind::Setting(it) => paint_block(g, &s, st, &cfg, it, &r),
+                BlockKind::Link(i) => {
+                    let (glyph, t, sub, _) = st.links[*i];
+                    paint_link(g, &s, &r, glyph, t, sub, st.hover == Hit::Link(*i), true);
+                }
+                BlockKind::Info(kind) => {
+                    let (glyph, t, value) = info_row(&st.info, *kind);
+                    paint_link(g, &s, &r, glyph, t, &value, false, false);
+                }
             }
         }
+        g.reset_clip();
+        let max_scroll = (st.content_h - rh(&cr)).max(0);
+        if max_scroll > 0 {
+            let bar_h = (rh(&cr) * rh(&cr) / st.content_h.max(1)).max(ui::s(30));
+            let by = cr.top + (rh(&cr) - bar_h) * st.scroll / max_scroll;
+            g.rounded((cr.right + ui::s(8)) as f32, by as f32, ui::s(4) as f32, bar_h as f32, ui::sf(2.0),
+                      Some(s.track), None);
+        }
 
-        // pie
-        g.hline(ui::s(226), w, h - ui::s(58), s.separator);
-        draw_button(g, &s, st.reset_page_rc, "Restablecer esta página", st.hover == Hit::ResetPage, false);
+        // ---- pie
+        g.hline(nav_w, w, h - ui::s(58), s.separator);
+        let resettable = NAV[st.page].reset.is_some() && !searching;
+        if resettable {
+            draw_button(g, &s, st.reset_page_rc, "Restablecer esta página", st.hover == Hit::ResetPage, false);
+        }
         draw_button(g, &s, st.reset_all_rc, "Restablecer todo", st.hover == Hit::ResetAll, false);
         draw_button(g, &s, st.open_ini_rc, "Abrir config.ini", st.hover == Hit::OpenIni, false);
     });
+}
+
+/// Tarjeta del equipo y mosaicos de categoría de la página de inicio.
+fn paint_home(g: &Gfx, s: &theme::Style, st: &State, dy: i32) {
+    let card = rect(st.x0, dy, st.cw, ui::s(96));
+    g.rounded(card.left as f32, card.top as f32, rw(&card) as f32, rh(&card) as f32, ui::sf(10.0),
+              Some(s.card_bg), Some((s.card_border, 1.0)));
+    let av = ui::s(56);
+    let ax = card.left + ui::s(18);
+    let ay = card.top + (rh(&card) - av) / 2;
+    g.fill_circle((ax + av / 2) as f32, (ay + av / 2) as f32, (av / 2) as f32, s.accent_solid);
+    let initial = st.info.usuario.chars().next().unwrap_or('U').to_uppercase().to_string();
+    g.text_in(&initial, ax as f32, ay as f32, av as f32, av as f32, 20.0, true, s.on_accent, Align::Center,
+              Align::Center, false);
+    let tx = ax + av + ui::s(16);
+    g.text_in(&st.info.usuario, tx as f32, (card.top + ui::s(20)) as f32, (rw(&card) - ui::s(120)) as f32,
+              ui::s(24) as f32, 15.0, true, s.text, Align::Near, Align::Center, false);
+    g.text_in(&st.info.equipo, tx as f32, (card.top + ui::s(44)) as f32, (rw(&card) - ui::s(120)) as f32,
+              ui::s(18) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+    g.text_in(&st.info.windows, tx as f32, (card.top + ui::s(62)) as f32, (rw(&card) - ui::s(120)) as f32,
+              ui::s(18) as f32, 10.5, false, s.text_faint, Align::Near, Align::Center, false);
+
+    for (k, r) in st.tiles.iter().enumerate() {
+        let i = k + 1;
+        let r = rect(r.left, r.top + dy, rw(r), rh(r));
+        let hov = st.hover == Hit::Tile(i);
+        g.rounded(r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, ui::sf(8.0),
+                  Some(if hov { s.control_hover } else { s.card_bg }), Some((s.card_border, 1.0)));
+        g.text_in(NAV[i].glyph, (r.left + ui::s(12)) as f32, r.top as f32, ui::s(30) as f32, rh(&r) as f32,
+                  14.0, false, s.accent, Align::Center, Align::Center, true);
+        g.text_in(NAV[i].title, (r.left + ui::s(50)) as f32, (r.top + ui::s(14)) as f32,
+                  (rw(&r) - ui::s(70)) as f32, ui::s(20) as f32, 12.5, true, s.text, Align::Near,
+                  Align::Center, false);
+        g.text_in(NAV[i].sub, (r.left + ui::s(50)) as f32, (r.top + ui::s(34)) as f32,
+                  (rw(&r) - ui::s(70)) as f32, ui::s(18) as f32, 10.5, false, s.text_dim, Align::Near,
+                  Align::Center, false);
+        g.text_in("\u{E76C}", (r.right - ui::s(26)) as f32, r.top as f32, ui::s(18) as f32, rh(&r) as f32,
+                  8.5, false, s.text_faint, Align::Center, Align::Center, true);
+    }
+}
+
+/// Fila de tarjeta con icono, título y valor (enlaces e información).
+fn paint_link(g: &Gfx, s: &theme::Style, r: &RECT, glyph: &str, title: &str, sub: &str, hov: bool,
+              chevron: bool) {
+    g.rounded(r.left as f32, r.top as f32, rw(r) as f32, rh(r) as f32, ui::sf(8.0),
+              Some(if hov { s.control_hover } else { s.card_bg }), Some((s.card_border, 1.0)));
+    g.text_in(glyph, (r.left + ui::s(12)) as f32, r.top as f32, ui::s(28) as f32, rh(r) as f32, 12.5, false,
+              s.accent, Align::Center, Align::Center, true);
+    let tx = r.left + ui::s(48);
+    let tw = rw(r) - ui::s(48) - if chevron { ui::s(34) } else { ui::s(16) };
+    if sub.is_empty() {
+        g.text_in(title, tx as f32, r.top as f32, tw as f32, rh(r) as f32, 12.5, false, s.text, Align::Near,
+                  Align::Center, false);
+    } else {
+        g.text_in(title, tx as f32, (r.top + ui::s(10)) as f32, tw as f32, ui::s(20) as f32, 12.5, false,
+                  s.text, Align::Near, Align::Center, false);
+        g.text_in(sub, tx as f32, (r.top + ui::s(30)) as f32, tw as f32, ui::s(18) as f32, 11.0, false,
+                  s.text_dim, Align::Near, Align::Center, false);
+    }
+    if chevron {
+        g.text_in("\u{E76C}", (r.right - ui::s(26)) as f32, r.top as f32, ui::s(18) as f32, rh(r) as f32,
+                  8.5, false, s.text_faint, Align::Center, Align::Center, true);
+    }
 }
 
 fn paint_block(g: &Gfx, s: &theme::Style, st: &State, cfg: &Config, it: &'static Item, r: &RECT) {
@@ -418,14 +1106,14 @@ fn paint_block(g: &Gfx, s: &theme::Style, st: &State, cfg: &Config, it: &'static
         g.rounded(r.left as f32, r.top as f32, rw(r) as f32, rh(r) as f32, ui::sf(8.0),
                   Some(s.card_bg), Some((s.card_border, 1.0)));
     }
-    // etiqueta y ayuda
     if card {
-        let label_w = rw(r) - ui::s(150);
+        let label_w = rw(r) - ui::s(170);
         g.text_in(it.label, (r.left + ui::s(16)) as f32, (r.top + ui::s(8)) as f32, label_w as f32,
                   ui::s(22) as f32, 13.0, false, s.text, Align::Near, Align::Center, false);
         if has_help(it) {
-            g.text_in(it.help, (r.left + ui::s(16)) as f32, (r.top + ui::s(28)) as f32, (rw(r) - ui::s(120)) as f32,
-                      ui::s(18) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+            g.text_in(it.help, (r.left + ui::s(16)) as f32, (r.top + ui::s(28)) as f32,
+                      (rw(r) - ui::s(130)) as f32, ui::s(18) as f32, 11.5, false, s.text_dim, Align::Near,
+                      Align::Center, false);
         }
     } else {
         g.text_in(it.label, r.left as f32, (r.top - ui::s(18)) as f32, rw(r) as f32, ui::s(20) as f32,
@@ -435,13 +1123,18 @@ fn paint_block(g: &Gfx, s: &theme::Style, st: &State, cfg: &Config, it: &'static
     match it.kind {
         Kind::Bool => {
             let sw = switch_rect(r);
+            // Windows 11 pone «Activado/Desactivado» junto al interruptor.
+            g.text_in(if value != 0 { "Activado" } else { "Desactivado" },
+                      (sw.left - ui::s(84)) as f32, sw.top as f32, ui::s(78) as f32, rh(&sw) as f32, 11.0,
+                      false, s.text_dim, Align::Far, Align::Center, false);
             g.switch(sw.left as f32, sw.top as f32, rw(&sw) as f32, rh(&sw) as f32, value != 0,
                      s.accent_solid, s.control_bg, if value != 0 { s.on_accent } else { s.text_dim });
         }
         Kind::Int { min, max, unit, .. } => {
             let (mr, pr) = stepper_rects(r);
             g.text_in(&format!("{} {}", value, unit), (mr.left - ui::s(90)) as f32, mr.top as f32,
-                      ui::s(84) as f32, rh(&mr) as f32, 12.0, false, s.text_dim, Align::Far, Align::Center, false);
+                      ui::s(84) as f32, rh(&mr) as f32, 12.0, false, s.text_dim, Align::Far, Align::Center,
+                      false);
             small_btn(g, s, mr, "\u{E738}", st.hover == Hit::Step(it.id, -1));
             small_btn(g, s, pr, "\u{E710}", st.hover == Hit::Step(it.id, 1));
             let t = track_rect(r);
@@ -454,8 +1147,8 @@ fn paint_block(g: &Gfx, s: &theme::Style, st: &State, cfg: &Config, it: &'static
                 g.rounded(cr.left as f32, cr.top as f32, rw(&cr) as f32, rh(&cr) as f32, ui::sf(6.0),
                           Some(if sel { s.accent_solid } else if hov { s.control_hover } else { s.control_bg }),
                           Some((if sel { s.accent_solid } else { s.control_border }, 1.0)));
-                g.text_in(opts[i], cr.left as f32, cr.top as f32, rw(&cr) as f32, rh(&cr) as f32, 12.0, false,
-                          if sel { s.on_accent } else { s.text }, Align::Center, Align::Center, false);
+                g.text_in(opts[i], cr.left as f32, cr.top as f32, rw(&cr) as f32, rh(&cr) as f32, 12.0,
+                          false, if sel { s.on_accent } else { s.text }, Align::Center, Align::Center, false);
             }
         }
         Kind::Cards(opts) => {
@@ -479,8 +1172,11 @@ fn paint_block(g: &Gfx, s: &theme::Style, st: &State, cfg: &Config, it: &'static
                 let c = theme::from_colorref(preset.color);
                 g.fill_circle(cx, cy, rad - ui::sf(2.0), c);
                 if sel {
-                    let lum = (0.299 * theme::r_of(c) as f32 + 0.587 * theme::g_of(c) as f32 + 0.114 * theme::b_of(c) as f32) / 255.0;
-                    g.check(cx, cy, rad * 0.8, if lum > 0.68 { theme::rgbc(20, 20, 24) } else { theme::rgbc(255, 255, 255) }, ui::sf(2.0));
+                    let lum = (0.299 * theme::r_of(c) as f32 + 0.587 * theme::g_of(c) as f32
+                        + 0.114 * theme::b_of(c) as f32) / 255.0;
+                    g.check(cx, cy, rad * 0.8,
+                            if lum > 0.68 { theme::rgbc(20, 20, 24) } else { theme::rgbc(255, 255, 255) },
+                            ui::sf(2.0));
                 }
             }
             let names = ["R", "G", "B"];
@@ -491,9 +1187,9 @@ fn paint_block(g: &Gfx, s: &theme::Style, st: &State, cfg: &Config, it: &'static
                           ui::s(26) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
                 slider(g, s, t, chans[i] as i32, 0, 255);
                 g.text_in(&format!("{}", chans[i]), (t.right + ui::s(10)) as f32, (t.top - ui::s(10)) as f32,
-                          ui::s(40) as f32, ui::s(26) as f32, 11.5, false, s.text_dim, Align::Near, Align::Center, false);
+                          ui::s(40) as f32, ui::s(26) as f32, 11.5, false, s.text_dim, Align::Near,
+                          Align::Center, false);
             }
-            // vista previa
             let pv = rect(r.right - ui::s(60), r.top + ui::s(10), ui::s(44), ui::s(24));
             g.rounded(pv.left as f32, pv.top as f32, rw(&pv) as f32, rh(&pv) as f32, ui::sf(5.0),
                       Some(theme::from_colorref(cfg.accent_colorref())), Some((s.card_border, 1.0)));
@@ -529,7 +1225,8 @@ fn mode_card(g: &Gfx, s: &theme::Style, r: &RECT, dark_mode: bool, label: &str, 
     let ph = rh(r) - ui::s(52);
     g.rounded(px as f32, py as f32, pw as f32, ph as f32, ui::sf(6.0), Some(bg), None);
     g.rounded(px as f32, py as f32, pw as f32, ui::s(18) as f32, ui::sf(6.0), Some(title), None);
-    g.rounded((px + ui::s(8)) as f32, (py + ui::s(5)) as f32, ui::s(8) as f32, ui::s(8) as f32, ui::sf(2.0), Some(s.accent_solid), None);
+    g.rounded((px + ui::s(8)) as f32, (py + ui::s(5)) as f32, ui::s(8) as f32, ui::s(8) as f32, ui::sf(2.0),
+              Some(s.accent_solid), None);
     g.text_in(label, (r.left + ui::s(14)) as f32, (r.bottom - ui::s(36)) as f32, (rw(r) - ui::s(50)) as f32,
               ui::s(28) as f32, 13.0, false, s.text, Align::Near, Align::Center, false);
     if selected {
@@ -545,13 +1242,15 @@ fn chrome_btn(g: &Gfx, s: &theme::Style, r: RECT, glyph: &str, hov: bool, close:
         g.fill_rect(r.left, r.top, rw(&r), rh(&r), if close { s.close_hover } else { s.control_hover });
     }
     let col = if hov && close { theme::rgbc(255, 255, 255) } else { s.text_dim };
-    g.text_in(glyph, r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, 10.0, false, col, Align::Center, Align::Center, true);
+    g.text_in(glyph, r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, 10.0, false, col,
+              Align::Center, Align::Center, true);
 }
 
 fn small_btn(g: &Gfx, s: &theme::Style, r: RECT, glyph: &str, hov: bool) {
     g.rounded(r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, ui::sf(5.0),
               Some(if hov { s.control_hover } else { s.control_bg }), Some((s.control_border, 1.0)));
-    g.text_in(glyph, r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, 8.0, false, s.text, Align::Center, Align::Center, true);
+    g.text_in(glyph, r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, 8.0, false, s.text,
+              Align::Center, Align::Center, true);
 }
 
 fn draw_button(g: &Gfx, s: &theme::Style, r: RECT, label: &str, hov: bool, primary: bool) {
@@ -563,20 +1262,30 @@ fn draw_button(g: &Gfx, s: &theme::Style, r: RECT, label: &str, hov: bool, prima
     } else {
         (if hov { s.control_hover } else { s.control_bg }, s.control_border, s.text)
     };
-    g.rounded(r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, ui::sf(6.0), Some(fill), Some((border, 1.0)));
-    g.text_in(label, r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, 12.5, false, fg, Align::Center, Align::Center, false);
+    g.rounded(r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, ui::sf(6.0), Some(fill),
+              Some((border, 1.0)));
+    g.text_in(label, r.left as f32, r.top as f32, rw(&r) as f32, rh(&r) as f32, 12.5, false, fg,
+              Align::Center, Align::Center, false);
 }
 
-// ---------------------------------------------------------------- interacción
+// ============================================================ interacción
 fn hit(st: &State, x: i32, y: i32) -> Hit {
-    // Las zonas del contenido solo valen dentro del área visible.
+    // La X del buscador tiene prioridad sobre el propio cuadro.
+    if !st.search.is_empty()
+        && in_rect(&rect(st.search_rc.right - ui::s(28), st.search_rc.top, ui::s(28), rh(&st.search_rc)), x, y)
+    {
+        return Hit::ClearSearch;
+    }
     for (r, h) in st.hits.iter() {
         if !in_rect(r, x, y) {
             continue;
         }
-        let inside_content = r.top >= st.content_rc.top - ui::s(30) && r.bottom <= st.content_rc.bottom + ui::s(30);
-        let is_content = !matches!(h, Hit::Nav(_) | Hit::Min | Hit::Close | Hit::ResetPage | Hit::ResetAll | Hit::OpenIni);
-        if is_content && !(inside_content && y >= st.content_rc.top && y <= st.content_rc.bottom) {
+        let is_chrome = matches!(h, Hit::Nav(_) | Hit::Min | Hit::Max | Hit::Close | Hit::Search
+                                     | Hit::ResetPage | Hit::ResetAll | Hit::OpenIni);
+        if !is_chrome && !(y >= st.content_rc.top && y <= st.content_rc.bottom) {
+            continue;
+        }
+        if *h == Hit::ResetPage && NAV[st.page].reset.is_none() {
             continue;
         }
         return *h;
@@ -584,7 +1293,6 @@ fn hit(st: &State, x: i32, y: i32) -> Hit {
     Hit::None
 }
 
-/// Valor correspondiente a la posición x dentro de una pista.
 fn value_at(track: &RECT, x: i32, min: i32, max: i32, step: i32) -> i32 {
     let w = rw(track).max(1);
     let raw = min + ((x - track.left) as i64 * (max - min) as i64 / w as i64) as i32;
@@ -596,15 +1304,12 @@ fn value_at(track: &RECT, x: i32, min: i32, max: i32, step: i32) -> i32 {
 fn slider_track(st: &State, id: Id, channel: u8) -> Option<RECT> {
     let dy = st.content_rc.top - st.scroll;
     for b in st.blocks.iter() {
-        if b.item.id != id {
+        let BlockKind::Setting(it) = &b.kind else { continue };
+        if it.id != id {
             continue;
         }
         let r = rect(b.rect.left, b.rect.top + dy, rw(&b.rect), rh(&b.rect));
-        return Some(if channel == 0 {
-            track_rect(&r)
-        } else {
-            color_tracks(&r)[(channel - 1) as usize]
-        });
+        return Some(if channel == 0 { track_rect(&r) } else { color_tracks(&r)[(channel - 1) as usize] });
     }
     None
 }
@@ -643,17 +1348,61 @@ fn nudge(st: &mut State, id: Id, dir: i32) {
     commit(st, &c, true);
 }
 
+fn open_with_shell(target: &str) {
+    unsafe {
+        ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(), ui::wide(target).as_ptr(),
+                      std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+    }
+}
+
+fn open_ini() {
+    config::save(&config::current());
+    let path = config::config_file();
+    open_with_shell(&path.to_string_lossy());
+}
+
+fn goto(st: &mut State, page: usize) {
+    st.page = page.min(NAV.len() - 1);
+    st.scroll = 0;
+    st.hover = Hit::None;
+    st.search.clear();
+    st.searching = false;
+    layout(st);
+    unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 0) };
+}
+
 fn click(st: &mut State, x: i32, y: i32) {
     let hwnd = st.hwnd;
-    match hit(st, x, y) {
+    let h = hit(st, x, y);
+    if h != Hit::Search && h != Hit::ClearSearch {
+        st.searching = false;
+    }
+    match h {
         Hit::Close => unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0); },
         Hit::Min => unsafe { ShowWindow(hwnd, SW_MINIMIZE); },
-        Hit::Nav(i) => {
-            st.page = i;
+        Hit::Max => unsafe {
+            ShowWindow(hwnd, if IsZoomed(hwnd) != 0 { SW_RESTORE } else { SW_MAXIMIZE });
+        },
+        Hit::Nav(i) => goto(st, i),
+        Hit::Tile(i) => goto(st, i),
+        Hit::Search => {
+            st.searching = true;
+            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        }
+        Hit::ClearSearch => {
+            st.search.clear();
+            st.searching = false;
             st.scroll = 0;
-            st.hover = Hit::None;
             layout(st);
             unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        }
+        Hit::Link(i) => {
+            let act = st.links[i].3;
+            match act {
+                Act::Url(u) => open_with_shell(u),
+                Act::Own("--abrir-ini") => open_ini(),
+                Act::Own(a) => crate::shell::launch_own(a),
+            }
         }
         Hit::Toggle(id) => {
             let mut c = config::current();
@@ -682,7 +1431,7 @@ fn click(st: &mut State, x: i32, y: i32) {
             apply_slider(st, id, ch, x, false);
         }
         Hit::ResetPage => {
-            if let Some(p) = NAV[st.page].page {
+            if let Some(p) = NAV[st.page].reset {
                 let mut c = config::current();
                 c.reset_page(p);
                 commit(st, &c, true);
@@ -692,20 +1441,13 @@ fn click(st: &mut State, x: i32, y: i32) {
             let c = Config::default();
             commit(st, &c, true);
         }
-        Hit::OpenIni => unsafe {
-            let path = config::config_file();
-            config::save(&config::current());
-            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
-                          ui::wide(&path.to_string_lossy()).as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
-        },
+        Hit::OpenIni => open_ini(),
         Hit::None => {}
     }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let st_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State;
-    // El mensaje de difusión lo origina esta ventana: la configuración ya está
-    // aplicada en memoria, solo hay que volver a medir.
     if msg == ui::config_changed_msg() {
         if !st_ptr.is_null() {
             window::refresh_frame(hwnd);
@@ -736,7 +1478,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if pt.y < ui::caption_h() {
                 if !st_ptr.is_null() {
                     let st = &*st_ptr;
-                    if in_rect(&st.close_rc, pt.x, pt.y) || in_rect(&st.min_rc, pt.x, pt.y) {
+                    if in_rect(&st.close_rc, pt.x, pt.y) || in_rect(&st.min_rc, pt.x, pt.y)
+                        || in_rect(&st.max_rc, pt.x, pt.y) {
                         return HTCLIENT as LRESULT;
                     }
                 }
@@ -755,6 +1498,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_PAINT => {
             if !st_ptr.is_null() {
                 paint(&*st_ptr);
+            }
+            0
+        }
+        WM_TIMER => {
+            // Refresco de los datos del equipo (red, batería, memoria).
+            if !st_ptr.is_null() {
+                let st = &mut *st_ptr;
+                let needs = st.page == 0 || NAV[st.page].groups.iter()
+                    .any(|g| g.rows.iter().any(|r| matches!(r, Row::Info(_))));
+                if needs {
+                    st.info = collect_info();
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
             }
             0
         }
@@ -787,7 +1543,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let st = &mut *st_ptr;
                 if st.drag.take().is_some() {
                     ReleaseCapture();
-                    // Al soltar se escribe en disco.
                     let c = config::current();
                     commit(st, &c, true);
                 }
@@ -805,26 +1560,54 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_CHAR => {
+            // Escribir en el buscador (una vez pulsado el cuadro).
+            if !st_ptr.is_null() {
+                let st = &mut *st_ptr;
+                if st.searching {
+                    let ch = wp as u32;
+                    if ch == VK_BACK as u32 {
+                        st.search.pop();
+                    } else if ch >= 0x20 {
+                        if let Some(c) = char::from_u32(ch) {
+                            st.search.push(c);
+                        }
+                    }
+                    st.scroll = 0;
+                    layout(st);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            0
+        }
         WM_KEYDOWN => {
             if !st_ptr.is_null() {
                 let st = &mut *st_ptr;
                 let vk = wp as u32;
                 let max_scroll = (st.content_h - rh(&st.content_rc)).max(0);
                 if vk == VK_ESCAPE as u32 {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    if st.searching || !st.search.is_empty() {
+                        st.search.clear();
+                        st.searching = false;
+                        layout(st);
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    } else {
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    }
                 } else if vk == VK_DOWN as u32 || vk == VK_UP as u32 {
                     let d = if vk == VK_DOWN as u32 { 1 } else { -1 };
                     st.scroll = (st.scroll + d * ui::s(40)).clamp(0, max_scroll);
                     layout(st);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 } else if vk == VK_LEFT as u32 || vk == VK_RIGHT as u32 {
-                    // Ajusta el control bajo el puntero.
                     let d = if vk == VK_RIGHT as u32 { 1 } else { -1 };
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
                     ScreenToClient(hwnd, &mut pt);
                     match hit(st, pt.x, pt.y) {
-                        Hit::Slider(id, 0) | Hit::Step(id, _) | Hit::Toggle(id) | Hit::Choice(id, _) => nudge(st, id, d),
+                        Hit::Slider(id, 0) | Hit::Step(id, _) | Hit::Toggle(id) | Hit::Choice(id, _) => {
+                            nudge(st, id, d)
+                        }
                         _ => {}
                     }
                 }
@@ -851,9 +1634,7 @@ pub fn run() -> i32 {
         let hinst = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
         ui::init(hinst);
 
-        // página inicial según el argumento posicional
-        let arg = args::positional().unwrap_or_default().to_lowercase();
-        let page = NAV.iter().position(|n| n.arg == arg).unwrap_or(0);
+        let page = page_for_arg(&args::positional().unwrap_or_default());
 
         let class_name = ui::wide("OShellRustSettings");
         let wc = WNDCLASSW {
@@ -872,8 +1653,8 @@ pub fn run() -> i32 {
 
         let mut wa = er();
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut _ as *mut c_void, 0);
-        let w = ui::s(980).min(wa.right - wa.left);
-        let h = ui::s(700).min(wa.bottom - wa.top);
+        let w = ui::s(1040).min(wa.right - wa.left);
+        let h = ui::s(720).min(wa.bottom - wa.top);
         let x = wa.left + (wa.right - wa.left - w) / 2;
         let y = wa.top + (wa.bottom - wa.top - h) / 2;
 
@@ -881,7 +1662,7 @@ pub fn run() -> i32 {
             WS_EX_APPWINDOW,
             class_name.as_ptr(),
             ui::wide("Configuración").as_ptr(),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME,
             x, y, w, h,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -898,13 +1679,20 @@ pub fn run() -> i32 {
             scroll: 0,
             content_h: 0,
             drag: None,
+            search: String::new(),
+            searching: false,
+            info: collect_info(),
             x0: 0,
             cw: 0,
             content_rc: er(),
             nav: Vec::new(),
+            search_rc: er(),
+            tiles: Vec::new(),
             blocks: Vec::new(),
+            links: Vec::new(),
             hits: Vec::new(),
             min_rc: er(),
+            max_rc: er(),
             close_rc: er(),
             reset_page_rc: er(),
             reset_all_rc: er(),
@@ -913,8 +1701,10 @@ pub fn run() -> i32 {
         let raw = Box::into_raw(st);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize);
         window::refresh_frame(hwnd);
-        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         layout(&mut *raw);
+        SetTimer(hwnd, 1, 5000, None);
         ShowWindow(hwnd, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd);
         ui::apply_perf();

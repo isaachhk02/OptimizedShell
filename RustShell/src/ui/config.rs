@@ -72,9 +72,33 @@ pub enum Id {
     Eco,
     LiberarMemoria,
     AnchoBotonTitulo,
+    // Barra de tareas: iconos de las aplicaciones y botón Inicio
+    BarraIconosApps,
+    BarraTamanoIcono,
+    BarraInicioCentro,
+    BarraIconoInicio,
+    BarraIconoIndice,
+    // Área de notificación (bandeja del sistema)
+    BandejaMostrar,
+    BandejaSonido,
+    BandejaRed,
+    BandejaBateria,
+    BandejaBluetooth,
+    BandejaNotificaciones,
+    BandejaPorcentajeBateria,
+    BandejaSeparador,
+    // Notificaciones
+    NotifActivadas,
+    NotifNoMolestar,
+    NotifDuracion,
+    NotifMax,
+    NotifAncho,
+    NotifPosicion,
+    NotifHistorial,
+    NotifSonido,
 }
 
-pub const COUNT: usize = Id::AnchoBotonTitulo as usize + 1;
+pub const COUNT: usize = Id::NotifSonido as usize + 1;
 
 /// Página de la ventana de Configuración a la que pertenece cada ajuste.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,6 +108,8 @@ pub enum Page {
     Menu = 2,
     Listas = 3,
     Rendimiento = 4,
+    Bandeja = 5,
+    Notificaciones = 6,
 }
 
 #[derive(Clone, Copy)]
@@ -127,12 +153,16 @@ pub const FONTS: &[&str] = &[
 const MODOS: &[&str] = &["Oscuro", "Claro"];
 const POSICIONES: &[&str] = &["Abajo", "Arriba"];
 const ALINEACIONES: &[&str] = &["Izquierda", "Centro"];
+const ICONOS_INICIO: &[&str] = &["Glifo", "shell32.dll", "imageres.dll", "Dibujado"];
+const ESQUINAS_NOTIF: &[&str] = &["Derecha", "Izquierda", "Centro"];
 
 const APARIENCIA: &str = "Apariencia";
 const BARRA: &str = "BarraDeTareas";
 const MENU: &str = "MenuInicio";
 const LISTAS: &str = "Listas";
 const RENDIMIENTO: &str = "Rendimiento";
+const BANDEJA: &str = "Bandeja";
+const NOTIFICACIONES: &str = "Notificaciones";
 
 /// Tabla de ajustes. **El orden debe coincidir con el de `Id`.**
 pub static ITEMS: &[Item] = &[
@@ -282,6 +312,76 @@ pub static ITEMS: &[Item] = &[
     Item { id: Id::AnchoBotonTitulo, page: Page::Apariencia, section: APARIENCIA, key: "AnchoBotonTitulo",
         label: "Ancho de los botones de la barra de título", help: "Minimizar, maximizar y cerrar.",
         kind: Kind::Int { min: 34, max: 64, step: 1, unit: "px" }, def: 46 },
+    // ------------------------------- barra: iconos de apps y botón Inicio
+    Item { id: Id::BarraIconosApps, page: Page::Barra, section: BARRA, key: "IconosApps",
+        label: "Mostrar el icono de cada aplicación",
+        help: "Usa el icono real de la ventana; si no tiene, el del ejecutable.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BarraTamanoIcono, page: Page::Barra, section: BARRA, key: "TamanoIcono",
+        label: "Tamaño de los iconos", help: "",
+        kind: Kind::Int { min: 12, max: 32, step: 1, unit: "px" }, def: 20 },
+    Item { id: Id::BarraInicioCentro, page: Page::Barra, section: BARRA, key: "InicioCentrado",
+        label: "Botón Inicio centrado",
+        help: "Coloca Inicio y los botones de ventana en el centro, como Windows 11.",
+        kind: Kind::Bool, def: 0 },
+    Item { id: Id::BarraIconoInicio, page: Page::Barra, section: BARRA, key: "IconoInicio",
+        label: "Icono del botón Inicio",
+        help: "Extraído de una DLL del sistema, o dibujado con el color de acento.",
+        kind: Kind::Choice(ICONOS_INICIO), def: 1 },
+    Item { id: Id::BarraIconoIndice, page: Page::Barra, section: BARRA, key: "IconoInicioIndice",
+        label: "Índice del icono dentro de la DLL",
+        help: "276 es el logotipo de Windows en shell32.dll.",
+        kind: Kind::Int { min: 0, max: 400, step: 1, unit: "" }, def: 276 },
+    // ------------------------------------------------- área de notificación
+    Item { id: Id::BandejaMostrar, page: Page::Bandeja, section: BANDEJA, key: "Mostrar",
+        label: "Mostrar el área de notificación",
+        help: "Sonido, red, batería, Bluetooth y notificaciones, junto al reloj.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaSonido, page: Page::Bandeja, section: BANDEJA, key: "Sonido",
+        label: "Volumen", help: "Icono de altavoz con el nivel del dispositivo predeterminado.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaRed, page: Page::Bandeja, section: BANDEJA, key: "Red",
+        label: "Red", help: "Wi-Fi (con su intensidad) o Ethernet, según la conexión activa.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaBateria, page: Page::Bandeja, section: BANDEJA, key: "Bateria",
+        label: "Batería", help: "Se oculta sola en equipos sin batería.", kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaBluetooth, page: Page::Bandeja, section: BANDEJA, key: "Bluetooth",
+        label: "Bluetooth", help: "Se oculta solo si el equipo no tiene radio Bluetooth.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaNotificaciones, page: Page::Bandeja, section: BANDEJA, key: "Notificaciones",
+        label: "Centro de notificaciones", help: "Campana con el número de avisos sin leer.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaPorcentajeBateria, page: Page::Bandeja, section: BANDEJA, key: "PorcentajeBateria",
+        label: "Mostrar el porcentaje de batería", help: "", kind: Kind::Bool, def: 1 },
+    Item { id: Id::BandejaSeparador, page: Page::Bandeja, section: BANDEJA, key: "Separador",
+        label: "Separador antes del reloj", help: "Línea fina entre los iconos y la hora.",
+        kind: Kind::Bool, def: 1 },
+    // ------------------------------------------------------- notificaciones
+    Item { id: Id::NotifActivadas, page: Page::Notificaciones, section: NOTIFICACIONES, key: "Activadas",
+        label: "Notificaciones", help: "Avisos emergentes de OptimizedShell y de las aplicaciones.",
+        kind: Kind::Bool, def: 1 },
+    Item { id: Id::NotifNoMolestar, page: Page::Notificaciones, section: NOTIFICACIONES, key: "NoMolestar",
+        label: "No molestar",
+        help: "Las notificaciones no aparecen en pantalla, pero sí en el centro de notificaciones.",
+        kind: Kind::Bool, def: 0 },
+    Item { id: Id::NotifDuracion, page: Page::Notificaciones, section: NOTIFICACIONES, key: "Duracion",
+        label: "Tiempo en pantalla", help: "",
+        kind: Kind::Int { min: 2000, max: 20000, step: 500, unit: "ms" }, def: 6000 },
+    Item { id: Id::NotifMax, page: Page::Notificaciones, section: NOTIFICACIONES, key: "MaxVisibles",
+        label: "Avisos visibles a la vez", help: "Los demás esperan su turno en la cola.",
+        kind: Kind::Int { min: 1, max: 5, step: 1, unit: "" }, def: 3 },
+    Item { id: Id::NotifAncho, page: Page::Notificaciones, section: NOTIFICACIONES, key: "Ancho",
+        label: "Ancho de los avisos", help: "",
+        kind: Kind::Int { min: 260, max: 520, step: 4, unit: "px" }, def: 360 },
+    Item { id: Id::NotifPosicion, page: Page::Notificaciones, section: NOTIFICACIONES, key: "Posicion",
+        label: "Esquina en la que aparecen", help: "",
+        kind: Kind::Choice(ESQUINAS_NOTIF), def: 0 },
+    Item { id: Id::NotifHistorial, page: Page::Notificaciones, section: NOTIFICACIONES, key: "Historial",
+        label: "Avisos guardados en el centro", help: "",
+        kind: Kind::Int { min: 0, max: 100, step: 5, unit: "" }, def: 30 },
+    Item { id: Id::NotifSonido, page: Page::Notificaciones, section: NOTIFICACIONES, key: "Sonido",
+        label: "Sonido al llegar un aviso", help: "Usa el sonido de notificación del sistema.",
+        kind: Kind::Bool, def: 1 },
 ];
 
 pub fn item(id: Id) -> &'static Item {

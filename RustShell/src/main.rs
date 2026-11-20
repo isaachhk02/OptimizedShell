@@ -3,12 +3,14 @@
 //
 // Modos: (sin argumentos) shell | --taskmgr | --explorer [ruta] | --settings [seccion]
 //        --logon | --lock | --demo | --install | --uninstall
+//        --notify "Título|Mensaje" [--tipo info|ok|aviso|error]
 #![windows_subsystem = "windows"]
 
 mod args;
 mod ui;
 mod apps;
 mod perf;
+mod sysinfo;
 mod startup;
 mod taskmgr;
 mod settings;
@@ -16,6 +18,8 @@ mod explorer;
 mod logon;
 mod shell;
 mod startmenu;
+mod tray;
+mod notify;
 
 use args::has_arg;
 
@@ -31,9 +35,36 @@ fn main() -> std::process::ExitCode {
         explorer::run()
     } else if has_arg("--install") || has_arg("--uninstall") {
         shell::install(has_arg("--install"))
+    } else if has_arg("--notify") {
+        send_notification()
     } else {
         // Modo shell (por defecto): barra de tareas.
         shell::run()
     };
     std::process::ExitCode::from(code as u8)
+}
+
+/// `--notify "Título|Mensaje"`: manda un aviso a la barra de tareas que ya
+/// esté en ejecución. Sirve para que un script, una tarea programada o
+/// cualquier otra parte de OptimizedShell avise al usuario.
+fn send_notification() -> i32 {
+    let text = args::positional().unwrap_or_default();
+    let (title, body) = match text.split_once('|') {
+        Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
+        None => (text.trim().to_string(), String::new()),
+    };
+    if title.is_empty() && body.is_empty() {
+        return 2;
+    }
+    let kind = if has_arg("--error") {
+        notify::Kind::Error
+    } else if has_arg("--aviso") {
+        notify::Kind::Warning
+    } else if has_arg("--ok") {
+        notify::Kind::Success
+    } else {
+        notify::Kind::Info
+    };
+    let app = args::value("--app").unwrap_or_else(|| "OptimizedShell".to_string());
+    if notify::post(&app, &title, &body, kind) { 0 } else { 1 }
 }

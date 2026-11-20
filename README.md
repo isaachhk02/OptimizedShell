@@ -9,12 +9,50 @@ Un solo ejecutable, `OptimizedShell.exe`, con varios modos:
 
 | Modo | Comando | Qué hace |
 |---|---|---|
-| Shell | `OptimizedShell.exe` | Barra de tareas acoplada con botón Inicio, ventanas abiertas, reloj y menú Inicio estilo Windows 7 |
+| Shell | `OptimizedShell.exe` | Barra de tareas acoplada: botón Inicio (logotipo de Windows, a la izquierda o centrado), ventanas abiertas con su icono, área de notificación, reloj, menú Inicio estilo Windows 7 y notificaciones |
 | Administrador de tareas | `--taskmgr [rendimiento\|inicio\|servicios]` | Procesos (CPU/memoria/hilos), Rendimiento (CPU, GPU, RAM, temperatura), Inicio, Servicios |
 | Explorador de archivos | `--explorer [ruta]` | Navegación, panel lateral y columnas ordenables |
 | Bloqueo / inicio de sesión | `--lock` · `--logon [--demo]` | Pantalla de bloqueo propia con autenticación |
-| Configuración | `--settings [personalizacion\|barra\|menu\|listas\|rendimiento\|fondo\|pantalla\|bluetooth]` | Toda la interfaz: tema, barra de tareas, menú Inicio, listas y rendimiento |
+| Configuración | `--settings [inicio\|sistema\|bluetooth\|red\|personalizacion\|barra\|menu\|aplicaciones\|accesibilidad\|acerca]` | Configuración del sistema al estilo de Windows 11: buscador, categorías, información del equipo y accesos a las páginas de Windows |
+| Notificación | `--notify "Título\|Mensaje" [--ok\|--aviso\|--error] [--app <nombre>]` | Manda un aviso a la barra de tareas en ejecución (para scripts y tareas programadas) |
 | Instalación | `--install` · `--uninstall` | Usa OptimizedShell como shell del usuario actual, o vuelve a Explorer |
+
+## Barra de tareas
+
+- **Botón Inicio** con el logotipo de Windows extraído de `shell32.dll` (o de
+  `imageres.dll`, un glifo o un logotipo dibujado con el color de acento), a la
+  izquierda o **centrado junto a los botones de ventana**, como en Windows 11.
+- **Botones de ventana** con el icono real de cada aplicación (`WM_GETICON`, y si
+  la ventana no declara ninguno, el del ejecutable), con o sin título, subrayado
+  de la ventana en primer plano y minimizar al volver a pulsarla.
+- **Área de notificación** (bandeja): volumen, red, Bluetooth, batería y la
+  campana de avisos, con descripción emergente al pasar el puntero.
+  - *Volumen*: nivel del dispositivo predeterminado (Core Audio). La rueda del
+    ratón sobre el icono lo sube y lo baja.
+  - *Red*: Wi-Fi con su intensidad en barras y el SSID, o Ethernet con su
+    velocidad; aspa roja cuando no hay ninguna interfaz operativa.
+  - *Batería*: dibujo con el nivel real, rayo al cargar, rojo por debajo del 20 %
+    y porcentaje opcional. Se oculta sola en equipos de escritorio.
+  - *Bluetooth*: se oculta solo si el equipo no tiene radio.
+- **Configuración rápida**: al pulsar cualquier icono se abre un panel al estilo
+  de Windows 11 con mosaicos (Red, Bluetooth, No molestar, Tema claro/oscuro),
+  deslizador de volumen con silencio, estado de la red y de la batería, y
+  accesos a Configuración y al Administrador de tareas. El botón derecho sobre
+  cada icono abre directamente la página de Windows correspondiente.
+
+## Notificaciones
+
+- **Avisos emergentes** apilados sobre la barra, con icono por tipo (información,
+  correcto, aviso, error), barra de tiempo restante y cierre automático; el aviso
+  bajo el puntero no caduca, para dar tiempo a leerlo.
+- **Centro de notificaciones**: historial con hora, borrado individual o
+  completo, «No molestar» y acceso a sus ajustes.
+- **Avisos propios del sistema**: batería baja y crítica, conexión y desconexión
+  del cargador, y caída o vuelta de la red.
+- **Desde fuera**: `OptimizedShell.exe --notify "Título|Mensaje"` se entrega a la
+  barra por `WM_COPYDATA`, así que cualquier script puede avisar al usuario.
+- Configurable: activarlas, No molestar, sonido, tiempo en pantalla, cuántas se
+  ven a la vez, ancho, esquina y tamaño del historial.
 
 ## Interfaz configurable
 
@@ -34,8 +72,14 @@ dibuja recorriendo esa tabla, así que **añadir un ajuste es añadir una fila**
     opacidad de barra y ventanas, radio de las esquinas, escala de la interfaz,
     tamaño del texto, familia tipográfica y alto/ancho de la barra de título.
   - *Barra de tareas*: alto, posición (arriba/abajo), alineación de los botones,
-    ancho de botón, títulos, botón Inicio, reloj (12/24 h, segundos, fecha),
-    reserva del área de trabajo, siempre visible e intervalo de refresco.
+    ancho de botón, títulos, iconos de las aplicaciones y su tamaño, botón
+    Inicio (centrado o no, y de qué DLL sale su icono), reloj (12/24 h,
+    segundos, fecha), reserva del área de trabajo, siempre visible e intervalo
+    de refresco.
+  - *Área de notificación*: mostrarla o no y qué iconos incluye (volumen, red,
+    batería con porcentaje, Bluetooth, campana) y el separador antes del reloj.
+  - *Notificaciones*: activarlas, No molestar, sonido, tiempo en pantalla,
+    avisos visibles a la vez, ancho, esquina e historial guardado.
   - *Menú Inicio*: ancho de la lista, alto del menú y de cada elemento, columna
     derecha, cuadro de búsqueda, cuántos programas frecuentes se muestran,
     iconos de los programas y qué entradas incluye.
@@ -91,13 +135,21 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
   - El muestreador solo se abre mientras la pestaña está a la vista, y si una
     fuente no existe (sin contadores de GPU, sin sensores ACPI) se dice por qué
     en vez de enseñar un cero.
-- **Configuración**: cinco páginas generadas desde la tabla de ajustes
-  (Personalización, Barra de tareas, Menú Inicio, Listas y explorador,
-  Rendimiento), con guardado en `config.ini` y aplicación en caliente.
+- **Configuración del sistema al estilo de Windows 11**: barra lateral con
+  buscador que filtra **todos** los ajustes a la vez, página de inicio con la
+  tarjeta del equipo (usuario, nombre del equipo y edición de Windows) y
+  mosaicos de categoría, y páginas formadas por grupos de tarjetas: Sistema,
+  Bluetooth y dispositivos, Red e Internet, Personalización, Barra de tareas,
+  Menú Inicio, Aplicaciones, Accesibilidad y Acerca de. Junto a los ajustes
+  propios hay filas de información en vivo (procesador, RAM, conexión actual,
+  batería, Bluetooth, salida de audio) y accesos a las páginas de Windows
+  (`ms-settings:`) que OptimizedShell no reimplementa. Todo se guarda en
+  `config.ini` y se aplica en caliente.
 - **Explorador**: navegación (atrás/adelante/arriba), panel lateral de accesos, columnas
   Nombre/Fecha/Tipo/Tamaño ordenables y apertura de archivos.
 - **Bloqueo**: reloj, tarjeta de usuario y autenticación con `LogonUserW`.
-- **Shell**: barra de tareas con botón Inicio, botones de ventanas abiertas y reloj;
+- **Shell**: barra de tareas con botón Inicio, botones de ventanas abiertas con
+  su icono, área de notificación, configuración rápida, notificaciones y reloj;
   `--install`/`--uninstall` sobre el valor `Shell` de Winlogon.
 - **Menú Inicio estilo Windows 7**: a la izquierda los programas más usados y el
   botón «Todos los programas» (lista completa con desplazamiento), abajo un
@@ -112,9 +164,11 @@ Rust). Ya funcionan, con interfaz equivalente a la original:
 
 - Task Manager: pestaña Servicios, iconos por fila,
   EcoQoS/prioridad/afinidad por proceso.
-- Configuración: páginas Fondo (galería de miniaturas), Pantalla (DisplayConfig/WMI) y
-  Bluetooth (WinRT).
+- Configuración: galería de fondos de escritorio con miniaturas y ajustes de
+  pantalla propios (DisplayConfig/WMI) en vez de abrir los de Windows.
+- Bandeja: encender y apagar la radio Wi-Fi/Bluetooth de verdad (API Radio de
+  WinRT) en vez de abrir la página de Windows, e iconos de las aplicaciones que
+  usan `Shell_NotifyIcon`.
 - Explorador: operaciones COM (`IFileOperation`), portapapeles, arrastrar y soltar,
   refresco por `ReadDirectoryChangesW`, menú contextual del shell.
-- Shell: escritorio con fondo, bandeja del sistema, flyouts de
-  volumen/Wi‑Fi/batería, hotkeys globales y anclar programas al menú Inicio.
+- Shell: escritorio con fondo, hotkeys globales y anclar programas al menú Inicio.

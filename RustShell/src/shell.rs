@@ -2,28 +2,47 @@
 // CppShell/src/shell.cpp.
 //
 // Barra de tareas acoplada (arriba o abajo, reservando el área de trabajo con
-// SHAppBarMessage) con botón Inicio, botones de las ventanas abiertas y reloj, y
-// un menú Inicio con acciones (Configuración, Explorador, Administrador de
-// tareas, Ejecutar, Bloquear, Reiniciar, Apagar). Todo lo que se ve aquí —alto,
-// posición, alineación, ancho de los botones, títulos, reloj (12/24 h,
-// segundos, fecha), intervalo de refresco, tamaño del menú y qué elementos
-// incluye— sale de `ui::config` y se puede cambiar en caliente desde
-// Configuración. --install / --uninstall escriben el valor Shell de Winlogon.
+// SHAppBarMessage) con botón Inicio —a la izquierda o centrado, con el
+// logotipo de Windows sacado de shell32.dll—, botones de las ventanas abiertas
+// con su icono real, el área de notificación (volumen, red, batería,
+// Bluetooth y campana de avisos) y el reloj.
+//
+// Todo lo que se ve aquí sale de `ui::config` y se puede cambiar en caliente
+// desde Configuración. --install / --uninstall escriben el valor Shell de
+// Winlogon.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::System::Registry::*;
+use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-use windows_sys::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABE_BOTTOM, ABE_TOP, APPBARDATA, ShellExecuteW};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE};
+use windows_sys::Win32::UI::Shell::{
+    ExtractIconExW, SHAppBarMessage, ShellExecuteW, ABE_BOTTOM, ABE_TOP, ABM_NEW, ABM_REMOVE,
+    ABM_SETPOS, APPBARDATA,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use crate::notify;
 use crate::startmenu;
+use crate::sysinfo::Net;
+use crate::tray::{self, Tray};
 use crate::ui::config::{self, Id};
 use crate::ui::gdip::{Align, Gfx};
 use crate::ui::{self, theme, window};
+
+/// Clase de la ventana de la barra. `notify::post` la busca por este nombre
+/// para mandarle avisos desde otros procesos.
+pub const CLASS: &str = "OShellRustTaskbar";
+pub const TIP_CLASS: &str = "OShellRustTip";
 
 struct AppBtn {
     hwnd: HWND,
@@ -36,12 +55,36 @@ struct State {
     apps: Vec<AppBtn>,
     start_rc: RECT,
     clock_rc: RECT,
-    hover: isize, // -1 ninguno, -2 inicio, >=0 índice de app
+    /// -1 ninguno, -2 inicio, -3..=-7 bandeja (-3 - índice), >=0 índice de app.
+    hover: isize,
     menu: HWND,
+    quick: HWND,
+    notif: notify::Windows,
+    tip: HWND,
+    tray: Tray,
+    tracking: bool,
+    /// Estado anterior, para avisar solo de los cambios.
+    last_net_up: Option<bool>,
+    last_charging: Option<bool>,
+    last_battery_level: i32,
+}
+
+/// Codificación del hover de la bandeja (para no usar otro campo).
+fn tray_hover(i: usize) -> isize {
+    -3 - i as isize
+}
+fn tray_hover_index(h: isize) -> Option<usize> {
+    if h <= -3 {
+        Some((-3 - h) as usize)
+    } else {
+        None
+    }
 }
 
 thread_local! {
     static ENUM_ACC: RefCell<Vec<AppBtn>> = RefCell::new(Vec::new());
+    /// Icono por ventana; se vacía al refrescar la lista de ventanas.
+    static WIN_ICONS: RefCell<HashMap<isize, isize>> = RefCell::new(HashMap::new());
 }
 
 fn er() -> RECT {
@@ -87,9 +130,128 @@ fn refresh_apps(st: &mut State) {
     ENUM_ACC.with(|a| a.borrow_mut().clear());
     unsafe { EnumWindows(Some(enum_proc), 0) };
     let mut apps = ENUM_ACC.with(|a| a.borrow_mut().drain(..).collect::<Vec<_>>());
-    apps.retain(|a| a.hwnd != own && a.hwnd != st.menu);
+    apps.retain(|a| {
+        a.hwnd != own && a.hwnd != st.menu && a.hwnd != st.quick && a.hwnd != st.tip
+            && a.hwnd != st.notif.toasts && a.hwnd != st.notif.center
+    });
+    // Las ventanas que han desaparecido dejan de ocupar sitio en la caché.
+    WIN_ICONS.with(|c| {
+        let live: Vec<isize> = apps.iter().map(|a| a.hwnd as isize).collect();
+        c.borrow_mut().retain(|k, _| live.contains(k));
+    });
     st.apps = apps;
     layout(st);
+}
+
+// ------------------------------------------------------------ iconos
+/// Icono de una ventana: el que declara ella misma y, si no tiene, el de su
+/// ejecutable. Cacheado por ventana (pedirlo en cada repintado sería caro).
+fn window_icon(hwnd: HWND) -> HICON {
+    let key = hwnd as isize;
+    if let Some(h) = WIN_ICONS.with(|c| c.borrow().get(&key).copied()) {
+        return h as HICON;
+    }
+    let icon = resolve_window_icon(hwnd);
+    WIN_ICONS.with(|c| c.borrow_mut().insert(key, icon as isize));
+    icon
+}
+
+fn resolve_window_icon(hwnd: HWND) -> HICON {
+    unsafe {
+        // ICON_SMALL2 (2) es el que usa el propio shell de Windows.
+        for msg in [2usize, 0, 1] {
+            let mut res: usize = 0;
+            // Con tiempo de espera: una aplicación colgada no puede bloquear la barra.
+            SendMessageTimeoutW(hwnd, WM_GETICON, msg, 0, SMTO_ABORTIFHUNG, 120, &mut res);
+            if res != 0 {
+                return res as HICON;
+            }
+        }
+        for idx in [GCLP_HICONSM, GCLP_HICON] {
+            let h = GetClassLongPtrW(hwnd, idx);
+            if h != 0 {
+                return h as HICON;
+            }
+        }
+        // Último recurso: el icono del ejecutable del proceso.
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return std::ptr::null_mut();
+        }
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if proc.is_null() {
+            return std::ptr::null_mut();
+        }
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(proc, 0, buf.as_mut_ptr(), &mut len);
+        windows_sys::Win32::Foundation::CloseHandle(proc);
+        if ok == 0 {
+            return std::ptr::null_mut();
+        }
+        crate::apps::icon(&String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+thread_local! {
+    /// Icono del botón Inicio extraído de una DLL del sistema.
+    static START_ICON: RefCell<Option<(i32, i32, isize)>> = RefCell::new(None);
+}
+
+/// Icono del botón Inicio según la configuración (`None` = dibujarlo).
+fn start_icon() -> HICON {
+    let c = config::current();
+    let which = c.get(Id::BarraIconoInicio);
+    let index = c.get(Id::BarraIconoIndice);
+    if which != 1 && which != 2 {
+        return std::ptr::null_mut();
+    }
+    START_ICON.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((w, i, h)) = *cell {
+            if w == which && i == index {
+                return h as HICON;
+            }
+        }
+        // Con la ruta completa: ExtractIconEx no siempre resuelve el nombre
+        // suelto según cuál sea el directorio de trabajo del proceso.
+        let dll = if which == 1 { "shell32.dll" } else { "imageres.dll" };
+        let mut sysdir = [0u16; 260];
+        let n = unsafe {
+            windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW(
+                sysdir.as_mut_ptr(), sysdir.len() as u32)
+        };
+        let path = if n > 0 {
+            format!("{}\\{}", String::from_utf16_lossy(&sysdir[..n as usize]), dll)
+        } else {
+            dll.to_string()
+        };
+        let mut large: HICON = std::ptr::null_mut();
+        let mut small: HICON = std::ptr::null_mut();
+        unsafe {
+            ExtractIconExW(ui::wide(&path).as_ptr(), index, &mut large, &mut small, 1);
+            if !large.is_null() && !small.is_null() {
+                // Se queda el grande (se escala mejor); el otro se libera.
+                DestroyIcon(small);
+            }
+        }
+        let h = if !large.is_null() { large } else { small };
+        *cell = Some((which, index, h as isize));
+        h
+    })
+}
+
+/// Logotipo de Windows dibujado con el color de acento (opción «Dibujado» y
+/// reserva si la DLL no da el icono).
+fn draw_logo(g: &Gfx, s: &theme::Style, cx: i32, cy: i32, size: i32) {
+    let gap = (size as f32 * 0.12).max(1.0);
+    let q = (size as f32 - gap) / 2.0;
+    let x = cx as f32 - size as f32 / 2.0;
+    let y = cy as f32 - size as f32 / 2.0;
+    for (dx, dy) in [(0.0, 0.0), (q + gap, 0.0), (0.0, q + gap), (q + gap, q + gap)] {
+        g.rounded(x + dx, y + dy, q, q, ui::sf(1.5), Some(s.accent), None);
+    }
 }
 
 /// Ancho que necesita el reloj según lo que muestre.
@@ -115,27 +277,43 @@ fn layout(st: &mut State) {
     let mut rc = er();
     unsafe { GetClientRect(st.hwnd, &mut rc) };
     let (w, h) = (rc.right, rc.bottom);
-    let start_w = if c.b(Id::BarraMostrarInicio) { ui::s(52) } else { 0 };
-    st.start_rc = RECT { left: 0, top: 0, right: start_w, bottom: h };
+
+    // Derecha: reloj y, a su izquierda, el área de notificación.
     let cw = clock_width(&c);
     st.clock_rc = RECT { left: w - cw, top: 0, right: w, bottom: h };
+    let tray_left = st.tray.layout(st.clock_rc.left, h);
 
+    let start_w = if c.b(Id::BarraMostrarInicio) { ui::s(52) } else { 0 };
     let bw = if c.b(Id::BarraMostrarTitulos) {
         ui::s(c.get(Id::BarraAnchoBoton))
     } else {
         ui::s(44)
     };
     let gap = ui::s(6);
-    let left_edge = st.start_rc.right + if start_w > 0 { ui::s(8) } else { ui::s(6) };
-    let right_edge = st.clock_rc.left - if cw > 0 { ui::s(8) } else { ui::s(6) };
     let n = st.apps.len() as i32;
-    let total = (n * bw + (n - 1).max(0) * gap).max(0);
-    let mut x = if c.get(Id::BarraAlineacion) == 1 {
-        // Centrado en el hueco libre, sin solaparse con el botón Inicio.
-        (((left_edge + right_edge) - total) / 2).max(left_edge)
+    let apps_w = (n * bw + (n - 1).max(0) * gap).max(0);
+
+    let left_margin = ui::s(6);
+    let right_edge = tray_left - if tray_left < st.clock_rc.left { ui::s(4) } else { ui::s(6) };
+    let centered_start = c.b(Id::BarraInicioCentro);
+
+    let (start_x, mut x) = if centered_start {
+        // Inicio y los botones forman un bloque centrado, como en Windows 11.
+        let group = start_w + if start_w > 0 && n > 0 { ui::s(8) } else { 0 } + apps_w;
+        let gx = (((left_margin + right_edge) - group) / 2).max(left_margin);
+        (gx, gx + start_w + if start_w > 0 && n > 0 { ui::s(8) } else { 0 })
     } else {
-        left_edge
+        let gx = 0;
+        let first = start_w + if start_w > 0 { ui::s(8) } else { left_margin };
+        let ax = if c.get(Id::BarraAlineacion) == 1 {
+            (((first + right_edge) - apps_w) / 2).max(first)
+        } else {
+            first
+        };
+        (gx, ax)
     };
+    st.start_rc = RECT { left: start_x, top: 0, right: start_x + start_w, bottom: h };
+
     let pad = (h / 8).max(ui::s(4));
     for a in st.apps.iter_mut() {
         a.rect = RECT { left: x, top: pad, right: (x + bw).min(right_edge), bottom: h - pad };
@@ -166,7 +344,7 @@ fn paint(st: &State) {
         let s = theme::style();
         g.clear(s.taskbar_bg);
         g.fill_rect(0, 0, w, h, s.taskbar_bg);
-        // botón Inicio
+        // ---- botón Inicio
         let sr = st.start_rc;
         if sr.right > sr.left {
             if st.hover == -2 {
@@ -174,29 +352,80 @@ fn paint(st: &State) {
                           (sr.right - sr.left - ui::s(8)) as f32, (sr.bottom - sr.top - ui::s(12)) as f32,
                           ui::sf(6.0), Some(s.task_button_hover), None);
             }
-            g.text_in("\u{E700}", sr.left as f32, sr.top as f32, (sr.right - sr.left) as f32,
-                      (sr.bottom - sr.top) as f32, 16.0, false, s.accent, Align::Center, Align::Center, true);
+            let cx = (sr.left + sr.right) / 2;
+            let cy = (sr.top + sr.bottom) / 2;
+            let size = ui::s(20);
+            match c.get(Id::BarraIconoInicio) {
+                1 | 2 => {
+                    let icon = start_icon();
+                    if icon.is_null() {
+                        draw_logo(g, &s, cx, cy, size);
+                    } else {
+                        g.draw_hicon(icon, cx - size / 2, cy - size / 2, size);
+                    }
+                }
+                3 => draw_logo(g, &s, cx, cy, size),
+                _ => g.text_in("\u{E700}", sr.left as f32, sr.top as f32, (sr.right - sr.left) as f32,
+                               (sr.bottom - sr.top) as f32, 16.0, false, s.accent, Align::Center,
+                               Align::Center, true),
+            }
         }
-        // botones de apps
+        // ---- botones de las ventanas
         let labels = c.b(Id::BarraMostrarTitulos);
+        let icons = c.b(Id::BarraIconosApps);
+        let isz = ui::s(c.get(Id::BarraTamanoIcono));
         for (i, a) in st.apps.iter().enumerate() {
             let r = a.rect;
             if r.right <= r.left + ui::s(8) {
                 continue;
             }
-            let bg = if st.hover == i as isize { s.task_button_hover } else { s.task_button };
+            let active = unsafe { GetForegroundWindow() } == a.hwnd;
+            let bg = if st.hover == i as isize {
+                s.task_button_hover
+            } else if active {
+                s.task_button_active
+            } else {
+                s.task_button
+            };
             g.rounded(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32,
                       ui::sf(6.0), Some(bg), None);
+            if active {
+                // Subrayado de la ventana en primer plano.
+                let uw = ((r.right - r.left) / 3).max(ui::s(10));
+                let ux = (r.left + r.right) / 2 - uw / 2;
+                g.rounded(ux as f32, (r.bottom - ui::s(3)) as f32, uw as f32, ui::s(2) as f32,
+                          ui::sf(1.0), Some(s.accent), None);
+            }
+            let hgt = r.bottom - r.top;
+            let mut tx = r.left + ui::s(10);
+            if icons {
+                let icon = window_icon(a.hwnd);
+                let ix = if labels { r.left + ui::s(8) } else { (r.left + r.right) / 2 - isz / 2 };
+                if icon.is_null() {
+                    g.text_in("\u{E737}", ix as f32, r.top as f32, isz as f32, hgt as f32, 11.0, false,
+                              s.text_dim, Align::Center, Align::Center, true);
+                } else {
+                    g.draw_hicon(icon, ix, r.top + (hgt - isz) / 2, isz);
+                }
+                tx = r.left + ui::s(8) + isz + ui::s(8);
+            }
             if labels {
-                g.text_in(&a.title, (r.left + ui::s(10)) as f32, r.top as f32,
-                          (r.right - r.left - ui::s(16)) as f32, (r.bottom - r.top) as f32,
+                g.text_in(&a.title, tx as f32, r.top as f32, (r.right - tx - ui::s(8)) as f32, hgt as f32,
                           11.5, false, s.text, Align::Near, Align::Center, false);
-            } else {
-                g.text_in("\u{E737}", r.left as f32, r.top as f32, (r.right - r.left) as f32,
-                          (r.bottom - r.top) as f32, 11.0, false, s.text_dim, Align::Center, Align::Center, true);
+            } else if !icons {
+                g.text_in("\u{E737}", r.left as f32, r.top as f32, (r.right - r.left) as f32, hgt as f32,
+                          11.0, false, s.text_dim, Align::Center, Align::Center, true);
             }
         }
-        // reloj
+        // ---- área de notificación
+        if c.b(Id::BandejaMostrar) {
+            if c.b(Id::BandejaSeparador) && !st.tray.items.is_empty() {
+                let x = st.tray.items[0].rect.left - ui::s(5);
+                g.line(x as f32, ui::s(10) as f32, x as f32, (h - ui::s(10)) as f32, s.separator, 1.0);
+            }
+            st.tray.paint(g, &s, st.hover);
+        }
+        // ---- reloj
         if c.b(Id::BarraMostrarReloj) {
             let mut now: SYSTEMTIME = unsafe { std::mem::zeroed() };
             unsafe { GetLocalTime(&mut now) };
@@ -216,14 +445,165 @@ fn paint(st: &State) {
     });
 }
 
-// ------------------------------------------------------------ menú Inicio
-// El menú (estilo Windows 7, con lista de programas y búsqueda) vive en
-// `startmenu`; aquí solo quedan el lanzador de la propia aplicación y la
-// creación de su ventana.
+// ------------------------------------------------------------ tooltip
+// Ventana de una sola línea que explica el icono bajo el puntero: en la
+// bandeja da el estado completo (SSID, carga, volumen) y en los botones de
+// ventana el título entero cuando no cabe.
+thread_local! {
+    static TIP_TEXT: RefCell<String> = RefCell::new(String::new());
+}
 
+unsafe extern "system" fn tip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            window::paint_buffered(hwnd, |g: &Gfx, w, h| {
+                let s = theme::style();
+                g.clear(theme::argb(0, 0, 0, 0));
+                g.rounded(0.0, 0.0, w as f32, h as f32, ui::sf(5.0), Some(s.menu_bg),
+                          Some((s.menu_border, 1.0)));
+                TIP_TEXT.with(|t| {
+                    g.text_in(&t.borrow(), ui::s(9) as f32, 0.0, (w - ui::s(18)) as f32, h as f32, 11.0,
+                              false, s.text, Align::Near, Align::Center, false);
+                });
+            });
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+fn show_tip(st: &State, text: &str, center_x: i32) {
+    if st.tip.is_null() || text.is_empty() {
+        return;
+    }
+    TIP_TEXT.with(|t| *t.borrow_mut() = text.to_string());
+    let w = ui::s(18) + (text.chars().count() as i32 * ui::s(7)).clamp(ui::s(40), ui::s(420));
+    let h = ui::s(28);
+    let bar = bar_rect();
+    let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let x = (center_x - w / 2).clamp(ui::s(4), (sw - w - ui::s(4)).max(0));
+    let y = if config::current().get(Id::BarraPosicion) == 1 {
+        bar.bottom + ui::s(6)
+    } else {
+        bar.top - h - ui::s(6)
+    };
+    unsafe {
+        SetWindowPos(st.tip, HWND_TOPMOST, x, y.max(0), w, h,
+                     SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        InvalidateRect(st.tip, std::ptr::null(), 0);
+    }
+}
+
+fn hide_tip(st: &State) {
+    if !st.tip.is_null() {
+        unsafe { ShowWindow(st.tip, SW_HIDE) };
+    }
+}
+
+/// Texto del tooltip para lo que hay bajo el puntero, y su centro en x.
+fn tip_for(st: &State) -> Option<(String, i32)> {
+    if let Some(i) = tray_hover_index(st.hover) {
+        let r = st.tray.items.get(i)?.rect;
+        return Some((st.tray.tooltip(i), (r.left + r.right) / 2));
+    }
+    if st.hover == -2 {
+        return Some(("Inicio".to_string(), (st.start_rc.left + st.start_rc.right) / 2));
+    }
+    if st.hover >= 0 {
+        let a = st.apps.get(st.hover as usize)?;
+        return Some((a.title.clone(), (a.rect.left + a.rect.right) / 2));
+    }
+    None
+}
+
+// ------------------------------------------------------------ avisos del sistema
+/// Compara el estado recién muestreado con el anterior y avisa de los cambios
+/// que importan: batería baja, enchufado/desenchufado y red caída o vuelta.
+fn report_changes(st: &mut State) {
+    if !config::current().b(Id::NotifActivadas) {
+        return;
+    }
+    let snap = st.tray.snap.clone();
+    let net_up = !matches!(snap.net, Net::Off);
+    if let Some(prev) = st.last_net_up {
+        if prev != net_up {
+            let note = if net_up {
+                let detail = match &snap.net {
+                    Net::Wifi { ssid, .. } => format!("Conectado a {}.", ssid),
+                    _ => "Conexión por cable restablecida.".to_string(),
+                };
+                notify::Note {
+                    app: "Red".into(), title: "Conexión restablecida".into(), body: detail,
+                    kind: notify::Kind::Success, time: String::new(), read: false,
+                }
+            } else {
+                notify::Note {
+                    app: "Red".into(), title: "Sin conexión".into(),
+                    body: "No hay ninguna interfaz de red operativa.".into(),
+                    kind: notify::Kind::Warning, time: String::new(), read: false,
+                }
+            };
+            raise(st, note);
+        }
+    }
+    st.last_net_up = Some(net_up);
+
+    let b = snap.battery;
+    if b.present {
+        if let Some(prev) = st.last_charging {
+            if prev != b.charging {
+                let note = notify::Note {
+                    app: "Energía".into(),
+                    title: if b.charging { "Cargando".into() } else { "Con batería".into() },
+                    body: if b.percent >= 0 {
+                        format!("Carga actual: {} %.", b.percent)
+                    } else {
+                        String::new()
+                    },
+                    kind: notify::Kind::Info, time: String::new(), read: false,
+                };
+                raise(st, note);
+            }
+        }
+        st.last_charging = Some(b.charging);
+        // Umbrales de aviso: solo al cruzarlos hacia abajo y sin cargador.
+        if !b.charging && b.percent >= 0 {
+            for (umbral, kind, title) in [
+                (10, notify::Kind::Error, "Batería crítica"),
+                (20, notify::Kind::Warning, "Batería baja"),
+            ] {
+                if b.percent <= umbral && st.last_battery_level > umbral {
+                    raise(st, notify::Note {
+                        app: "Energía".into(), title: title.into(),
+                        body: format!("Queda un {} % de batería. Conecta el cargador.", b.percent),
+                        kind, time: String::new(), read: false,
+                    });
+                    break;
+                }
+            }
+        }
+        st.last_battery_level = if b.percent >= 0 { b.percent } else { 100 };
+    }
+}
+
+/// Entrega un aviso generado dentro del propio shell (sin pasar por WM_COPYDATA).
+fn raise(st: &State, mut note: notify::Note) {
+    note.time = {
+        let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
+        unsafe { GetLocalTime(&mut t) };
+        format!("{:02}:{:02}", t.wHour, t.wMinute)
+    };
+    notify::receive(&st.notif, note);
+}
+
+// ------------------------------------------------------------ menú Inicio
 fn own_exe() -> String {
     let mut buf = [0u16; 512];
-    let n = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32) };
+    let n = unsafe {
+        windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW(
+            std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32)
+    };
     String::from_utf16_lossy(&buf[..n as usize])
 }
 
@@ -243,7 +623,7 @@ fn toggle_menu(st: &State) {
 
 // ------------------------------------------------------------ colocación
 /// Rectángulo que ocupa la barra según la configuración.
-fn bar_rect() -> RECT {
+pub fn bar_rect() -> RECT {
     let c = config::current();
     let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
@@ -293,10 +673,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     if msg == ui::config_changed_msg() {
         ui::reload_config();
         if !st_ptr.is_null() {
-            apply_placement(&mut *st_ptr, false);
+            let st = &mut *st_ptr;
+            // El icono del botón Inicio puede haber cambiado de origen.
+            START_ICON.with(|c| *c.borrow_mut() = None);
+            apply_placement(st, false);
             ui::apply_perf();
             InvalidateRect(hwnd, std::ptr::null(), 0);
-            InvalidateRect((*st_ptr).menu, std::ptr::null(), 0);
+            InvalidateRect(st.menu, std::ptr::null(), 0);
         }
         return 0;
     }
@@ -308,6 +691,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_COPYDATA => {
+            // Aviso enviado por otra instancia de OptimizedShell.
+            if !st_ptr.is_null() && lp != 0 {
+                let cds = &*(lp as *const COPYDATASTRUCT);
+                if let Some(note) = notify::decode(cds) {
+                    let st = &mut *st_ptr;
+                    if notify::receive(&st.notif, note) {
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                }
+            }
+            1
+        }
         WM_DISPLAYCHANGE => {
             if !st_ptr.is_null() {
                 apply_placement(&mut *st_ptr, false);
@@ -317,7 +713,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_TIMER => {
             if !st_ptr.is_null() {
-                refresh_apps(&mut *st_ptr);
+                let st = &mut *st_ptr;
+                if wp == 2 {
+                    // Se ha cumplido la espera: enseña el tooltip de lo que hay debajo.
+                    KillTimer(hwnd, 2);
+                    if let Some((text, cx)) = tip_for(st) {
+                        show_tip(st, &text, cx);
+                    }
+                    return 0;
+                }
+                refresh_apps(st);
+                if config::current().b(Id::BandejaMostrar) && st.tray.sample(false) {
+                    report_changes(st);
+                    layout(st);
+                }
                 InvalidateRect(hwnd, std::ptr::null(), 0);
             }
             0
@@ -325,10 +734,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_MOUSEMOVE => {
             if !st_ptr.is_null() {
                 let st = &mut *st_ptr;
+                if !st.tracking {
+                    let mut tme: TRACKMOUSEEVENT = std::mem::zeroed();
+                    tme.cbSize = std::mem::size_of::<TRACKMOUSEEVENT>() as u32;
+                    tme.dwFlags = TME_LEAVE;
+                    tme.hwndTrack = hwnd;
+                    TrackMouseEvent(&mut tme);
+                    st.tracking = true;
+                }
                 let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
                 let mut hov: isize = -1;
-                if in_rect(&st.start_rc, x, y) {
+                if in_rect(&st.start_rc, x, y) && st.start_rc.right > st.start_rc.left {
                     hov = -2;
+                } else if let Some(i) = st.tray.hit(x, y) {
+                    hov = tray_hover(i);
                 } else {
                     for (i, a) in st.apps.iter().enumerate() {
                         if in_rect(&a.rect, x, y) {
@@ -339,7 +758,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 if hov != st.hover {
                     st.hover = hov;
+                    hide_tip(st);
+                    KillTimer(hwnd, 2);
+                    if hov != -1 {
+                        // Pequeña espera antes del tooltip, como el resto de Windows.
+                        SetTimer(hwnd, 2, 600, None);
+                    }
                     InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            0
+        }
+        WM_MOUSELEAVE => {
+            if !st_ptr.is_null() {
+                let st = &mut *st_ptr;
+                st.tracking = false;
+                st.hover = -1;
+                KillTimer(hwnd, 2);
+                hide_tip(st);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            0
+        }
+        WM_MOUSEWHEEL => {
+            // La rueda sobre el icono de volumen lo sube y lo baja.
+            if !st_ptr.is_null() {
+                let st = &mut *st_ptr;
+                if let Some(i) = tray_hover_index(st.hover) {
+                    if st.tray.items.get(i).map(|t| t.kind) == Some(tray::Kind::Volume) {
+                        let delta = ((wp >> 16) & 0xFFFF) as i16 as i32;
+                        let v = (st.tray.snap.volume + (delta / 120) * 2).clamp(0, 100);
+                        crate::sysinfo::set_volume(v);
+                        st.tray.snap.volume = v;
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
                 }
             }
             0
@@ -347,17 +799,36 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_LBUTTONDOWN => {
             if !st_ptr.is_null() {
                 let st = &mut *st_ptr;
+                hide_tip(st);
                 let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
-                if in_rect(&st.start_rc, x, y) {
+                if in_rect(&st.start_rc, x, y) && st.start_rc.right > st.start_rc.left {
                     toggle_menu(st);
+                    return 0;
+                }
+                if let Some(i) = st.tray.hit(x, y) {
+                    let r = st.tray.items[i].rect;
+                    let cx = (r.left + r.right) / 2;
+                    st.tray.sample(true);
+                    match st.tray.items[i].kind {
+                        tray::Kind::Bell => {
+                            notify::toggle_center(st.notif.center, cx);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
+                        _ => tray::toggle_quick(st.quick, cx, &st.tray.snap),
+                    }
                     return 0;
                 }
                 for a in &st.apps {
                     if in_rect(&a.rect, x, y) {
-                        if IsIconic(a.hwnd) != 0 {
-                            ShowWindow(a.hwnd, SW_RESTORE);
+                        // Pulsar la ventana en primer plano la minimiza, como el shell real.
+                        if GetForegroundWindow() == a.hwnd {
+                            ShowWindow(a.hwnd, SW_MINIMIZE);
+                        } else {
+                            if IsIconic(a.hwnd) != 0 {
+                                ShowWindow(a.hwnd, SW_RESTORE);
+                            }
+                            SetForegroundWindow(a.hwnd);
                         }
-                        SetForegroundWindow(a.hwnd);
                         break;
                     }
                 }
@@ -365,8 +836,37 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_RBUTTONUP => {
-            // Botón derecho en la barra: abre Configuración en la página de la
-            // barra de tareas.
+            if !st_ptr.is_null() {
+                let st = &*st_ptr;
+                let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+                // Botón derecho sobre la bandeja: la página de ajustes que toque.
+                if let Some(i) = st.tray.hit(x, y) {
+                    match st.tray.items[i].kind {
+                        tray::Kind::Volume => {
+                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
+                                          ui::wide("ms-settings:sound").as_ptr(), std::ptr::null(),
+                                          std::ptr::null(), SW_SHOWNORMAL);
+                        }
+                        tray::Kind::Net => {
+                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
+                                          ui::wide("ms-settings:network-status").as_ptr(),
+                                          std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+                        }
+                        tray::Kind::Bluetooth => {
+                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
+                                          ui::wide("ms-settings:bluetooth").as_ptr(), std::ptr::null(),
+                                          std::ptr::null(), SW_SHOWNORMAL);
+                        }
+                        tray::Kind::Battery => {
+                            ShellExecuteW(std::ptr::null_mut(), ui::wide("open").as_ptr(),
+                                          ui::wide("ms-settings:powersleep").as_ptr(), std::ptr::null(),
+                                          std::ptr::null(), SW_SHOWNORMAL);
+                        }
+                        tray::Kind::Bell => launch_own("--settings notificaciones"),
+                    }
+                    return 0;
+                }
+            }
             launch_own("--settings barra");
             0
         }
@@ -418,7 +918,7 @@ pub fn run() -> i32 {
         let hinst = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
         ui::init(hinst);
 
-        let class_name = ui::wide("OShellRustTaskbar");
+        let class_name = ui::wide(CLASS);
         let wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
@@ -432,6 +932,21 @@ pub fn run() -> i32 {
             lpszClassName: class_name.as_ptr(),
         };
         RegisterClassW(&wc);
+
+        let tip_class = ui::wide(TIP_CLASS);
+        let wtip = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(tip_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinst,
+            hIcon: std::ptr::null_mut(),
+            hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: tip_class.as_ptr(),
+        };
+        RegisterClassW(&wtip);
 
         startmenu::register(hinst);
 
@@ -451,6 +966,19 @@ pub fn run() -> i32 {
             return 1;
         }
         let menu = startmenu::create(hinst);
+        let quick = tray::create_quick(hinst);
+        let notif = notify::create(hinst);
+        let tip = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            tip_class.as_ptr(),
+            ui::wide("").as_ptr(),
+            WS_POPUP,
+            0, 0, 10, 10,
+            std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null(),
+        );
+        if !tip.is_null() {
+            window::apply_frame_opaque(tip, config::current().dark());
+        }
 
         let st = Box::new(State {
             hwnd,
@@ -459,9 +987,19 @@ pub fn run() -> i32 {
             clock_rc: er(),
             hover: -1,
             menu,
+            quick,
+            notif,
+            tip,
+            tray: Tray::new(),
+            tracking: false,
+            last_net_up: None,
+            last_charging: None,
+            last_battery_level: 100,
         });
         let raw = Box::into_raw(st);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize);
+        (*raw).tray.sample(true);
+        report_changes(&mut *raw);
         apply_placement(&mut *raw, true);
         refresh_apps(&mut *raw);
         ShowWindow(hwnd, SW_SHOW);
@@ -472,4 +1010,3 @@ pub fn run() -> i32 {
         code
     }
 }
-

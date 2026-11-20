@@ -1,6 +1,6 @@
 [package]
 name = "optimized-shell"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "OptimizedShell: shell ligero para Windows (port a Rust, mínimo consumo)"
 build = "build.rs"
@@ -20,6 +20,8 @@ windows-sys = { version = "0.60", features = [
     "Win32_Security",
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Time",
     "Win32_System_Shutdown",
     "Win32_UI_WindowsAndMessaging",
