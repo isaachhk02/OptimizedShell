@@ -1,6 +1,6 @@
 [package]
 name = "optimized-shell"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2021"
 description = "OptimizedShell: entorno ligero para Windows en Rust (barra de tareas, menú Inicio, escritorio, explorador, administrador de tareas, pantalla de bloqueo y configuración), en cuatro ejecutables independientes"
 license = "GPL-3.0-or-later"

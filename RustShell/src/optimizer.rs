@@ -254,14 +254,8 @@ fn process_owned_by_current_user(pid: u32, current: &[u8]) -> bool {
 pub fn trim_all_processes() -> (usize, usize) {
     let pids = process_ids();
     let total = pids.len();
-    let current = current_user_sid();
     let mut trimmed = 0usize;
     for pid in pids {
-        if let Some(ref sid) = current {
-            if !process_owned_by_current_user(pid, sid) {
-                continue;
-            }
-        }
         if trim_process(pid) {
             trimmed += 1;
         }
