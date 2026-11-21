@@ -15,7 +15,7 @@ propio proceso: si el explorador se cuelga, la barra de tareas sigue viva.
 | `OptimizedExplorer.exe` | Explorador de archivos | `[ruta]` |
 | `OptimizedTaskmgr.exe` | Administrador de tareas | `[procesos\|rendimiento\|inicio\|servicios]` |
 | `OptimizedLogonUI.exe` | Pantalla de bloqueo e inicio de sesión | `--lock` · `--logon` · `--demo` |
-
+| `OptimizedOptimizer.exe` | Optimizador ligero de RAM (recorte de working sets + purgado de listas) | `--dry-run` · `--trim-only` · `--purge` · `--log` |
 Cuando los cuatro están instalados juntos, la barra, el escritorio y los menús lanzan
 el ejecutable de cada herramienta; si solo hay `OptimizedShell.exe`, él sigue sabiendo
 hacerlo todo con los flags de siempre:

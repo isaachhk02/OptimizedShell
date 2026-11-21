@@ -30,6 +30,9 @@ path = "src/bin/taskmgr.rs"
 name = "OptimizedLogonUI"
 path = "src/bin/logonui.rs"
 
+[[bin]]
+name = "OptimizedOptimizer"
+path = "src/bin/optimizer.rs"
 [dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",

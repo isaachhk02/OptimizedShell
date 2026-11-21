@@ -13,8 +13,7 @@
 #![windows_subsystem = "windows"]
 
 use optimized_shell::args::has_arg;
-use optimized_shell::{explorer, logon, send_notification, settings, shell, taskmgr, update};
-
+use optimized_shell::{explorer, logon, optimizer, send_notification, settings, shell, taskmgr, update};
 fn main() -> std::process::ExitCode {
     let code = if has_arg("--logon") || has_arg("--lock") {
         logon::run(has_arg("--lock"), has_arg("--demo"))
@@ -24,6 +23,8 @@ fn main() -> std::process::ExitCode {
         settings::run()
     } else if has_arg("--explorer") {
         explorer::run()
+    } else if has_arg("--optimize") || has_arg("--optimizer") {
+        optimizer::run()
     } else if has_arg("--install") || has_arg("--uninstall") {
         shell::install(has_arg("--install"))
     } else if has_arg("--update") {

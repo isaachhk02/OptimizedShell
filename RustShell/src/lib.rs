@@ -18,7 +18,7 @@ pub mod explorer;
 pub mod fileops;
 pub mod logon;
 pub mod notify;
-pub mod perf;
+pub mod optimizer;pub mod perf;
 pub mod radio;
 pub mod services;
 pub mod settings;

@@ -51,7 +51,7 @@ if (-not $admin) {
 
 # --------------------------------------------------------- de dónde se copia
 $exeNames = @('OptimizedShell.exe', 'OptimizedExplorer.exe', 'OptimizedTaskmgr.exe',
-              'OptimizedLogonUI.exe')
+              'OptimizedLogonUI.exe', 'OptimizedOptimizer.exe')
 
 function Test-Source([string]$path) {
     if (-not $path) { return $false }
@@ -129,7 +129,7 @@ if (-not $NoShortcuts) {
         @{ Name = 'Administrador de tareas';          Target = $taskmgrExe; Args = '' },
         @{ Name = 'Configuración';                    Target = $shellExe;   Args = '--settings' },
         @{ Name = 'Bloquear la sesión';               Target = $logonExe;   Args = '--lock' },
-        @{ Name = 'Buscar actualizaciones';           Target = $shellExe;   Args = '--update' },
+        @{ Name = 'Optimizador de RAM';               Target = (Join-Path $Dir 'OptimizedOptimizer.exe'); Args = '' },        @{ Name = 'Buscar actualizaciones';           Target = $shellExe;   Args = '--update' },
         @{ Name = 'Desinstalar OptimizedShell';       Target = 'powershell.exe';
            Args = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Dir 'uninstall.ps1')`"" }
     )
