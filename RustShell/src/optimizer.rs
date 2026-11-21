@@ -22,11 +22,40 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::Services::{
+    ChangeServiceConfig2W, CloseServiceHandle, ControlService, CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW,
+    RegisterServiceCtrlHandlerW, SetServiceStatus, StartServiceCtrlDispatcherW, StartServiceW,
+    SERVICE_STATUS, SERVICE_TABLE_ENTRYW,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
 };
 
 const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+
+// --- servicio de Windows ---
+const SERVICE_NAME: &str = "OptimizedOptimizer";
+const SERVICE_DISPLAY: &str = "OptimizedOptimizer (optimizador de RAM)";
+const SERVICE_WIN32_OWN_PROCESS: u32 = 0x00000010;
+const SERVICE_AUTO_START: u32 = 0x00000002;
+const SERVICE_ERROR_NORMAL: u32 = 0x00000001;
+const SERVICE_START_PENDING: u32 = 0x00000002;
+const SERVICE_RUNNING: u32 = 0x00000004;
+const SERVICE_STOP_PENDING: u32 = 0x00000003;
+const SERVICE_STOPPED: u32 = 0x00000001;
+const SERVICE_ACCEPT_STOP: u32 = 0x00000001;
+const SERVICE_CONTROL_STOP: u32 = 0x00000001;
+const SC_MANAGER_CREATE_SERVICE: u32 = 0x00000002;
+const SC_MANAGER_CONNECT: u32 = 0x00000001;
+const SERVICE_ALL_ACCESS: u32 = 0x000F01FF;
+const SERVICE_STOP: u32 = 0x00000020;
+const SERVICE_QUERY_STATUS: u32 = 0x00000004;
+const DELETE_SERVICE: u32 = 0x00010000;
+const SERVICE_CONFIG_DESCRIPTION: u32 = 1;
+
+static mut SERVICE_STATUS_HANDLE: windows_sys::Win32::System::Services::SERVICE_STATUS_HANDLE = std::ptr::null_mut();
+static SERVICE_STOP_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 use crate::args;
 
@@ -263,8 +292,175 @@ fn optimizer_log_path() -> std::path::PathBuf {
     p
 }
 
+/// Convierte un &str a Vec<u16> terminado en null (para APIs wide).
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+unsafe extern "system" fn control_handler(ctrl: u32) {
+    if ctrl == SERVICE_CONTROL_STOP {
+        SERVICE_STOP_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        let status = SERVICE_STATUS {
+            dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+            dwCurrentState: SERVICE_STOP_PENDING,
+            dwControlsAccepted: 0,
+            dwWin32ExitCode: 0,
+            dwServiceSpecificExitCode: 0,
+            dwCheckPoint: 0,
+            dwWaitHint: 3000,
+        };
+        if SERVICE_STATUS_HANDLE != std::ptr::null_mut() {
+            SetServiceStatus(SERVICE_STATUS_HANDLE, &status);
+        }
+    }
+}
+
+unsafe fn set_service_status(state: u32, controls: u32, wait_hint: u32) {
+    let status = SERVICE_STATUS {
+        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+        dwCurrentState: state,
+        dwControlsAccepted: controls,
+        dwWin32ExitCode: 0,
+        dwServiceSpecificExitCode: 0,
+        dwCheckPoint: 0,
+        dwWaitHint: wait_hint,
+    };
+    if SERVICE_STATUS_HANDLE != std::ptr::null_mut() {
+        SetServiceStatus(SERVICE_STATUS_HANDLE, &status);
+    }
+}
+
+unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
+    let mut name = wide(SERVICE_NAME);
+    SERVICE_STATUS_HANDLE = RegisterServiceCtrlHandlerW(name.as_ptr(), Some(control_handler));
+    SERVICE_STOP_REQUESTED.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    set_service_status(SERVICE_START_PENDING, 0, 3000);
+    set_service_status(SERVICE_RUNNING, SERVICE_ACCEPT_STOP, 0);
+
+    while !SERVICE_STOP_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+        // Optimiza los procesos del usuario.
+        let _ = trim_all_processes();
+        // Espera 5 minutos, comprobando la parada cada segundo.
+        for _ in 0..300 {
+            if SERVICE_STOP_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    set_service_status(SERVICE_STOPPED, 0, 0);
+}
+
+/// Intenta ejecutarse como servicio de Windows. Devuelve true si el SCM
+/// arrancó el proceso como servicio.
+pub fn try_run_as_service() -> bool {
+    unsafe {
+        let mut name = wide(SERVICE_NAME);
+        let mut table = [
+            SERVICE_TABLE_ENTRYW {
+                lpServiceName: name.as_mut_ptr(),
+                lpServiceProc: Some(service_main),
+            },
+            SERVICE_TABLE_ENTRYW {
+                lpServiceName: std::ptr::null_mut(),
+                lpServiceProc: None,
+            },
+        ];
+        StartServiceCtrlDispatcherW(table.as_mut_ptr()) != 0
+    }
+}
+
+/// Instala el servicio (auto-inicio). Requiere elevación.
+pub fn install_service() -> i32 {
+    unsafe {
+        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CREATE_SERVICE);
+        if scm.is_null() {
+            return 1;
+        }
+        let path = match std::env::current_exe() {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => {
+                // fallback
+                String::new()
+            }
+        };
+        let pathw = wide(&path);
+        let name = wide(SERVICE_NAME);
+        let display = wide(SERVICE_DISPLAY);
+        let svc = CreateServiceW(
+            scm,
+            name.as_ptr(),
+            display.as_ptr(),
+            SERVICE_ALL_ACCESS,
+            SERVICE_WIN32_OWN_PROCESS,
+            SERVICE_AUTO_START,
+            SERVICE_ERROR_NORMAL,
+            pathw.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        if svc.is_null() {
+            CloseServiceHandle(scm);
+            return 1;
+        }
+        // Descripción.
+        #[repr(C)]
+        struct ServiceDescription {
+            lpDescription: *mut u16,
+        }
+        let desc_text = wide("Optimiza periódicamente los procesos del usuario recortando su working set.");
+        let mut desc = ServiceDescription {
+            lpDescription: desc_text.as_ptr() as *mut u16,
+        };
+        let _ = ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &mut desc as *mut _ as *mut _);
+        // Intentar arrancar ahora.
+        let _ = StartServiceW(svc, 0, std::ptr::null());
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        0
+    }
+}
+
+/// Desinstala el servicio. Requiere elevación.
+pub fn uninstall_service() -> i32 {
+    unsafe {
+        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return 1;
+        }
+        let name = wide(SERVICE_NAME);
+        let svc = OpenServiceW(scm, name.as_ptr(), SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE_SERVICE);
+        if svc.is_null() {
+            CloseServiceHandle(scm);
+            return 1;
+        }
+        let mut status: SERVICE_STATUS = std::mem::zeroed();
+        let _ = ControlService(svc, SERVICE_CONTROL_STOP, &mut status);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let ok = DeleteService(svc) != 0;
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        if ok {
+            0
+        } else {
+            1
+        }
+    }
+}
+
 /// Punto de entrada del optimizador. Devuelve código de salida.
 pub fn run() -> i32 {
+    if args::has_arg("--install-service") {
+        return install_service();
+    }
+    if args::has_arg("--uninstall-service") {
+        return uninstall_service();
+    }
     let dry = args::has_arg("--dry-run");
 
     let before = physical_in_use();
