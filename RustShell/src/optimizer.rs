@@ -17,11 +17,16 @@
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::Security::{
+    GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY,
+};
 use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
 };
+
+const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
 
 use crate::args;
 
@@ -158,12 +163,76 @@ fn purge_system_lists() -> bool {
     }
 }
 
-/// Recorta todos los procesos accesibles. Devuelve (total, recortados).
+/// Obtiene el SID del usuario actual.
+fn current_user_sid() -> Option<Vec<u8>> {
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let sid = token_user_sid(token);
+        CloseHandle(token);
+        sid
+    }
+}
+
+/// Extrae los bytes del SID de un token.
+fn token_user_sid(token: *mut c_void) -> Option<Vec<u8>> {
+    unsafe {
+        let mut size = 0u32;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size);
+        if size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut c_void, size, &mut size) == 0 {
+            return None;
+        }
+        let tu = &*(buf.as_ptr() as *const windows_sys::Win32::Security::TOKEN_USER);
+        let sid = tu.User.Sid;
+        let len = GetLengthSid(sid) as usize;
+        if len == 0 {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(sid as *const u8, len).to_vec())
+    }
+}
+
+/// ¿El proceso pertenece al usuario actual? (evita tocar procesos del sistema)
+fn process_owned_by_current_user(pid: u32, current: &[u8]) -> bool {
+    if pid == 0 || pid == 4 {
+        return false;
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut token = std::ptr::null_mut();
+        let ok = OpenProcessToken(h, TOKEN_QUERY, &mut token);
+        CloseHandle(h);
+        if ok == 0 || token.is_null() {
+            return false;
+        }
+        let sid = token_user_sid(token);
+        CloseHandle(token);
+        sid.map_or(false, |s| s == current)
+    }
+}
+
+/// Recorta los procesos del usuario actual (menos agresivo, más compatible con AV).
+/// Devuelve (total_procesos, recortados).
 pub fn trim_all_processes() -> (usize, usize) {
     let pids = process_ids();
     let total = pids.len();
+    let current = current_user_sid();
     let mut trimmed = 0usize;
     for pid in pids {
+        if let Some(ref sid) = current {
+            if !process_owned_by_current_user(pid, sid) {
+                continue;
+            }
+        }
         if trim_process(pid) {
             trimmed += 1;
         }
@@ -197,7 +266,6 @@ fn optimizer_log_path() -> std::path::PathBuf {
 /// Punto de entrada del optimizador. Devuelve código de salida.
 pub fn run() -> i32 {
     let dry = args::has_arg("--dry-run");
-    let trim_only = args::has_arg("--trim-only");
 
     let before = physical_in_use();
 
@@ -207,15 +275,11 @@ pub fn run() -> i32 {
         trim_all_processes()
     };
 
+    // Por defecto NO se purgan las listas del sistema (menos agresivo para AV).
+    // Solo si se pide explícitamente con --purge y hay elevación.
     let mut purged = false;
-    if !dry && !trim_only {
-        let no_purge = args::has_arg("--no-purge");
-        let force_purge = args::has_arg("--purge");
-        if !no_purge && (force_purge || crate::services::is_elevated()) {
-            if crate::services::is_elevated() {
-                purged = purge_system_lists();
-            }
-        }
+    if !dry && args::has_arg("--purge") && crate::services::is_elevated() {
+        purged = purge_system_lists();
     }
 
     if !dry {
@@ -226,7 +290,7 @@ pub fn run() -> i32 {
     let elevated = crate::services::is_elevated();
 
     let report = format!(
-        "OptimizedOptimizer: procesos={}, recortados={}, liberados={} (antes {} MB, despues {} MB), listas_sistema={}, elevado={}",
+        "OptimizedOptimizer: procesos={}, recortados_usuario={}, liberados={} (antes {} MB, despues {} MB), listas_sistema={}, elevado={}",
         total,
         trimmed,
         format_bytes(freed),

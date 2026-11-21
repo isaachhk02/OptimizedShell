@@ -61,7 +61,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           New-Item -ItemType Directory -Force dist\installer | Out-Null
           # Los cuatro ejecutables del entorno.
-          $exes = 'OptimizedShell.exe', 'OptimizedExplorer.exe', 'OptimizedTaskmgr.exe', 'OptimizedLogonUI.exe'
+          $exes = 'OptimizedShell.exe', 'OptimizedExplorer.exe', 'OptimizedTaskmgr.exe', 'OptimizedLogonUI.exe', 'OptimizedOptimizer.exe'
           foreach ($e in $exes) { Copy-Item (Join-Path $out $e) (Join-Path 'dist' $e) }
           Copy-Item README.md dist\README.md
           Copy-Item LICENSE dist\LICENSE
@@ -76,7 +76,7 @@ jobs:
           }
           $hash = (Get-FileHash dist\OptimizedShell.exe -Algorithm SHA256).Hash
           $size = '{0:N0}' -f ((Get-ChildItem (($exes | ForEach-Object { Join-Path 'dist' $_ })) | Measure-Object Length -Sum).Sum)
-          Compress-Archive -Path dist\OptimizedShell.exe, dist\OptimizedExplorer.exe, dist\OptimizedTaskmgr.exe, dist\OptimizedLogonUI.exe, dist\README.md, dist\LICENSE, dist\installer -DestinationPath "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip"
+          Compress-Archive -Path dist\OptimizedShell.exe, dist\OptimizedExplorer.exe, dist\OptimizedTaskmgr.exe, dist\OptimizedLogonUI.exe, dist\OptimizedOptimizer.exe, dist\README.md, dist\LICENSE, dist\installer -DestinationPath "dist\OptimizedShell-${{ steps.tag.outputs.tag }}-x86_64-windows.zip"
           "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
