@@ -1,3 +1,4 @@
 # Compilación de Rust
 /RustShell/target/
+/RustShell-Wayland/target/
 **/*.rs.bk

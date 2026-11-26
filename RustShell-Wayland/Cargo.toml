@@ -1,0 +1,27 @@
+[package]
+name = "rustshell-wayland"
+version = "0.1.0"
+edition = "2021"
+description = """
+Shell de escritorio para Wayland basado en OptimizedShell (estilo visual del
+proyecto Windows). Panel de barra, menú Iniciо y reloj por ahora; en desarrollo:
+botones de ventana, explorador, admin. de tareas, notificaciones...
+"""
+license = "GPL-3.0-or-later"
+repository = "https://github.com/isaachhk02/OptimizedShell"
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio"] }
+iced_layershell = "0.19.1"
+chrono = "0.4"
+
+# iced_exdevtools 0.19.1 no compila contra winit-core 0.31.0-beta.4
+# (falta el caso `Ohos`); vendoremos y parchearemos ese caso aquí.
+[patch.crates-io]
+iced_exdevtools = { path = "vendor/iced_exdevtools" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

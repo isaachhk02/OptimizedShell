@@ -1,0 +1,119 @@
+/*
+ * Estilo visual de OptimizedShell (v0.8.3) exportado para Wayland/Linux.
+ *
+ * Tokens extraídos de `ui::theme` (src/ui/theme.rs) y los valores por
+ * defecto de `src/ui/config.rs`: el tema oscuro es el predeterminado
+ * (`Modo` = Oscuro), el acento por defecto es "Azul" (#3B82F6), la barra
+ * está en opacidad 60 % y las ventanas en 96 %.
+ *
+ * En un shell Wayland (GTK4/eBPF/iced/wgpu) usa estas variables donde
+ * diga "opcional" y arrastra el tema entero con `data-theme="os-light"`
+ * o cambiando el atributo de clase que marque el shell.
+ */
+
+:root,
+.os-theme-dark {
+  /* ------- tema oscuro (predeterminado) ------- */
+
+  /* Fondos y texto */
+  --os-window-bg: #11141B;          /* window_bg, opac. 96 % */
+  --os-title-bg: #171B24;           /* title_bg, opac. 96 % */
+  --os-card-bg: #1B1F29;            /* card_bg */
+  --os-card-border: rgba(255, 255, 255, 0.157);
+  --os-text: #E8ECF4;
+  --os-text-dim: #94A0B2;
+  --os-text-faint: #697488;
+  --os-nav-bg: #13161E;
+  --os-dialog-bg: #14171F;
+  --os-menu-bg: #1E222C;
+  --os-menu-hover: #303644;
+  --os-menu-border: rgba(255, 255, 255, 0.235);
+  --os-taskbar-bg: #101218;         /* opac. 60 % */
+  --os-task-button: #1C1F28;
+  --os-task-button-hover: #262A36;
+  --os-task-button-active: #2E3342;
+  --os-flyout-bg: #151820;          /* opac. 96 % */
+  --os-flyout-border: rgba(255, 255, 255, 0.255);
+  --os-graph-bg: #161A23;
+  --os-row-hover: #222733;
+  --os-control-bg: #232834;
+  --os-control-hover: #2C3240;
+  --os-control-border: rgba(255, 255, 255, 0.18);
+  --os-separator: rgba(255, 255, 255, 0.118);
+  --os-grid-line: rgba(255, 255, 255, 0.071);
+  --os-track: rgba(255, 255, 255, 0.235);
+
+  /* Acanto */
+  --os-accent: #5E99F8;             /* accent = mix(azul, blanco, 0.18) */
+  --os-accent-hover: #5391F7;       /* accent_hover = mix(azul, blanco, 0.12) */
+  --os-accent-solid: #3B82F6;       /* azul del que se mezcla */
+  --os-on-accent: #FFFFFF;          /* luminancia del acento > 0.68 */
+  --os-row-selected: rgba(59, 130, 246, 0.353);
+  --os-focus-ring: rgba(94, 153, 248, 0.59);
+
+  /* Estado / cálculo */
+  --os-danger: #F87171;
+  --os-success: #4ADE80;
+  --os-warning: #FBBF24;
+  --os-close-hover: #C42B2B;
+
+  /* ------- geometría y tipografía ------- */
+  --os-bar-height: 48px;            /* BarraAlto, predeterminado */
+  --os-icon-size: 20px;             /* TamanoIcono, iconos de bandeja */
+  --os-window-btn-width: 170px;     /* AnchoBoton, botones de ventana */
+  --os-titlebar-height: 42px;       /* AltoTitulo */
+  --os-radius: 10px;                /* Radio, predeterminado */
+  --os-opacity-bar: 0.60;
+  --os-opacity-windows: 0.96;
+  --os-blur: on;                    /* Desenfoque */
+  --os-font: "Segoe UI", "Noto Sans", sans-serif;  /* Fuente */
+  --os-font-size: 13px;
+  --os-clock-size: 18px;            /* tamaño del reloj en la barra */
+  --os-clock-date-size: 16px;       /* tamaño de la fecha, si se muestra */
+
+  /* Paleta de acentos (muestras, índice 0 = el predeterminado) */
+  --os-accent-palette: #3B82F6 #0EA5E9 #14B8A6 #22C55E #84CC16 #EAB308
+                       #F97316 #EF4444 #EC4899 #8B5CF6 #64748B;
+}
+
+/* Tema claro (Modo = Claro) */
+.os-theme-light {
+  --os-window-bg: #F7F8FA;
+  --os-title-bg: #EDEFF3;
+  --os-card-bg: #FFFFFF;
+  --os-card-border: rgba(0, 0, 0, 0.14);
+  --os-text: #1A1E26;
+  --os-text-dim: #4E5868;
+  --os-text-faint: #7C8492;
+  --os-nav-bg: #F0F2F5;
+  --os-dialog-bg: #F9FAFB;
+  --os-menu-bg: #FCFCFD;
+  --os-menu-hover: #E5E9F0;
+  --os-menu-border: rgba(0, 0, 0, 0.18);
+  --os-taskbar-bg: #EEF0F4;
+  --os-task-button: #E2E5EB;
+  --os-task-button-hover: #D6DBE3;
+  --os-task-button-active: #FAFBFC;
+  --os-flyout-bg: #F8F9FB;
+  --os-flyout-border: rgba(0, 0, 0, 0.18);
+  --os-graph-bg: #FFFFFF;
+  --os-row-hover: #E6E9EF;
+  --os-control-bg: #FFFFFF;
+  --os-control-hover: #EAEDF2;
+  --os-control-border: rgba(0, 0, 0, 0.19);
+  --os-separator: rgba(0, 0, 0, 0.10);
+  --os-grid-line: rgba(0, 0, 0, 0.08);
+  --os-track: rgba(0, 0, 0, 0.18);
+
+  --os-accent: #3472D8;
+  --os-accent-hover: #3575DD;
+  --os-accent-solid: #3B82F6;
+  --os-on-accent: #FFFFFF;
+  --os-row-selected: rgba(59, 130, 246, 0.235);
+  --os-focus-ring: rgba(52, 114, 216, 0.59);
+
+  --os-danger: #DC2626;
+  --os-success: #16A34A;
+  --os-warning: #CA8A04;
+  --os-close-hover: #C42B2B;
+}
